@@ -1,6 +1,5 @@
 /**
- * Vercel Edge — proxy Lark Open API (tránh CORS trên hosting tĩnh).
- * Trình duyệt gọi /api/lark/open-apis/... → open.larksuite.com/open-apis/...
+ * Vercel Edge — proxy Lark Open API (/api/lark/*).
  */
 export const config = { runtime: 'edge' }
 

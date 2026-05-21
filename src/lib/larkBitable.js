@@ -119,10 +119,12 @@ function commuteSig(f) {
   return [norm(f[M.MaNv]), norm(f[M.PhuongTien]), norm(f[M.KmMotChieu]), norm(f[M.NgayDiLamThang]), norm(f[M.Wfh])].join('|')
 }
 
-/** Base URL: dev = proxy Vite; production (Vercel) = /api/lark; override bằng VITE_LARK_API_BASE */
+/** Base URL: dev = proxy Vite; production (Vercel) = /api/lark */
 export function larkOpenApiPrefix() {
   const v = import.meta.env.VITE_LARK_API_BASE
-  if (v != null && String(v).trim() !== '') return String(v).replace(/\/$/, '')
+  const custom = v != null ? String(v).trim().replace(/\/$/, '') : ''
+  // Không dùng /lark-open-api trên production (chỉ có khi npm run dev)
+  if (custom && custom !== '/lark-open-api') return custom
   if (import.meta.env.DEV) return '/lark-open-api'
   return '/api/lark'
 }
@@ -146,10 +148,16 @@ async function larkFetch(path, init = {}, prefixOverride) {
   }
 
   if (!res.ok) {
-    if (res.status === 404 && prefix.startsWith('/')) {
+    const looksLikeSpaHtml =
+      res.status === 404 &&
+      (text.trimStart().startsWith('<!') || /<!DOCTYPE/i.test(text) || text.includes('<html'))
+    if (looksLikeSpaHtml && prefix.startsWith('/')) {
       throw new Error(
-        'HTTP 404 — không gọi được Lark API. Trên Vercel cần deploy kèm thư mục `api/lark`. Hosting tĩnh (Hostinger file HTML) không có proxy — hãy deploy lên Vercel hoặc chạy `npm run dev` khi test local.',
+        'HTTP 404 — route /api/lark chưa chạy trên server. Redeploy Vercel (cần file api/lark.js + vercel.json có "handle": "filesystem"). Xóa biến VITE_LARK_API_BASE=/lark-open-api trên Vercel nếu có.',
       )
+    }
+    if (res.status === 404 && prefix.startsWith('/')) {
+      throw new Error(`HTTP 404 — Lark API: ${url}`)
     }
     const msg = typeof json.msg === 'string' ? json.msg : ''
     throw new Error(msg ? `HTTP ${res.status}: ${msg}` : `HTTP ${res.status}`)
