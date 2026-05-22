@@ -1306,6 +1306,69 @@ tbody tr:hover td {
   width: 100%;
 }
 
+.lark-config-status {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: var(--surface2, #f4f3ef);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.lark-config-warn {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: #b85c00;
+  line-height: 1.45;
+}
+
+.lark-config-ok {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.lark-config-list {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.lark-config-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.lark-config-list li:last-child {
+  border-bottom: none;
+}
+
+.lark-config-list code {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.lark-config-flag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.lark-config-flag.ok {
+  background: #e8f5ee;
+  color: var(--accent);
+}
+
+.lark-config-flag.bad {
+  background: #fdecea;
+  color: #c0392b;
+}
+
 .lark-debug-hint {
   width: 100%;
   margin: 0 0 8px;

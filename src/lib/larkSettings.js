@@ -47,6 +47,28 @@ function mergePreferEnv(stored, env) {
   }
 }
 
+/** Trạng thái biến VITE_LARK_* lúc `npm run build` (Vercel: phải Redeploy sau khi thêm env). */
+export function getLarkEnvBuildFlags() {
+  const e = fromEnv()
+  return {
+    appId: !!e.appId,
+    appSecret: !!e.appSecret,
+    baseAppToken: !!e.baseAppToken,
+    tableOffice: !!e.tableOffice,
+    tableTrips: !!e.tableTrips,
+    tableCommute: !!e.tableCommute,
+    tableClose: !!e.tableClose,
+  }
+}
+
+/** @param {string} s @param {number} [show] */
+export function maskLarkValue(s, show = 4) {
+  const t = String(s ?? '').trim()
+  if (!t) return '(trống)'
+  if (t.length <= show + 2) return '••••'
+  return `${t.slice(0, show)}…${t.slice(-3)}`
+}
+
 /** @returns {LarkBitableSettings} */
 export function loadLarkSettings() {
   const env = fromEnv()

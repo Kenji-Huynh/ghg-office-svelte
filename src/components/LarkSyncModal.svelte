@@ -1,6 +1,11 @@
 <script>
   import { currentMonth, currentYear, periodLabel, equipRows, empTrips, commuteList } from '../lib/ghg.js'
-  import { loadLarkSettings } from '../lib/larkSettings.js'
+  import {
+    loadLarkSettings,
+    getLarkEnvBuildFlags,
+    maskLarkValue,
+    clearLarkSettingsStorage,
+  } from '../lib/larkSettings.js'
   import {
     buildLarkPeriodRecords,
     syncCurrentPeriodToLark,
@@ -34,6 +39,20 @@
       commute: !!s.tableCommute?.trim(),
     }
   })
+
+  const larkConfig = $derived.by(() => {
+    if (!open) return null
+    const s = loadLarkSettings()
+    const build = getLarkEnvBuildFlags()
+    const ok = !!(s.appId && s.appSecret && s.baseAppToken)
+    const anyTable = !!(s.tableOffice || s.tableTrips || s.tableCommute)
+    return { s, build, ok, anyTable }
+  })
+
+  function resetLarkStorage() {
+    clearLarkSettingsStorage()
+    toastOk('Đã xóa cấu hình Lark lưu trên trình duyệt. F5 trang — dùng lại biến từ Vercel (sau Redeploy).')
+  }
 
   function showLastLarkError() {
     const d = getLastLarkErrorDetails()
@@ -96,6 +115,77 @@
           <strong>đã có trên Base</strong>; «Kỳ báo cáo» là tùy chọn (không có cột kỳ trên Base thì bỏ qua). Trùng dữ liệu
           sẽ bị bỏ qua khi đồng bộ.
         </p>
+        {#if larkConfig}
+          <section class="lark-config-status" aria-label="Trạng thái cấu hình Lark">
+            <h3 class="lark-preview-heading">Cấu hình Lark (env)</h3>
+            {#if !larkConfig.build.appId && !larkConfig.build.appSecret}
+              <p class="lark-config-warn">
+                Biến <code>VITE_LARK_*</code> <strong>trống trong bản build</strong>. Trên Vercel: Settings →
+                Environment Variables → tick <strong>Production</strong> → <strong>Redeploy</strong> (không chỉ Save).
+              </p>
+            {:else if !larkConfig.ok}
+              <p class="lark-config-warn">Thiếu App ID / Secret / Base token sau khi gộp env — kiểm tra tên biến đúng
+                <code>VITE_LARK_APP_ID</code>, …</p>
+            {:else}
+              <p class="lark-config-ok">Đã nhận cấu hình từ build (Vercel env).</p>
+            {/if}
+            <ul class="lark-config-list">
+              <li>
+                <span>App ID</span>
+                <code>{maskLarkValue(larkConfig.s.appId)}</code>
+                <span class="lark-config-flag" class:ok={larkConfig.build.appId} class:bad={!larkConfig.build.appId}
+                  >{larkConfig.build.appId ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+              <li>
+                <span>App Secret</span>
+                <code>{larkConfig.s.appSecret ? '••••••' : '(trống)'}</code>
+                <span class="lark-config-flag" class:ok={larkConfig.build.appSecret} class:bad={!larkConfig.build.appSecret}
+                  >{larkConfig.build.appSecret ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+              <li>
+                <span>Base token</span>
+                <code>{maskLarkValue(larkConfig.s.baseAppToken)}</code>
+                <span
+                  class="lark-config-flag"
+                  class:ok={larkConfig.build.baseAppToken}
+                  class:bad={!larkConfig.build.baseAppToken}>{larkConfig.build.baseAppToken ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+              <li>
+                <span>Bảng VP</span>
+                <code>{maskLarkValue(larkConfig.s.tableOffice, 3)}</code>
+                <span
+                  class="lark-config-flag"
+                  class:ok={larkConfig.build.tableOffice}
+                  class:bad={!larkConfig.build.tableOffice}>{larkConfig.build.tableOffice ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+              <li>
+                <span>Bảng CT</span>
+                <code>{maskLarkValue(larkConfig.s.tableTrips, 3)}</code>
+                <span
+                  class="lark-config-flag"
+                  class:ok={larkConfig.build.tableTrips}
+                  class:bad={!larkConfig.build.tableTrips}>{larkConfig.build.tableTrips ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+              <li>
+                <span>Bảng đi làm</span>
+                <code>{maskLarkValue(larkConfig.s.tableCommute, 3)}</code>
+                <span
+                  class="lark-config-flag"
+                  class:ok={larkConfig.build.tableCommute}
+                  class:bad={!larkConfig.build.tableCommute}
+                  >{larkConfig.build.tableCommute ? 'build ✓' : 'build ✗'}</span
+                >
+              </li>
+            </ul>
+            <button type="button" class="btn btn-sm" onclick={resetLarkStorage}>Xóa cấu hình Lark trên trình duyệt</button>
+          </section>
+        {/if}
+
         <div class="lark-target-chips" aria-label="Bảng đích đã cấu hình">
           <span class="lark-target-chip" class:inactive={!targets.office}>
             Văn phòng (Scope 1 &amp; 2){#if targets.office}<span class="lark-target-ok"> · sẽ gửi</span>{:else}<span class="lark-target-skip"> · chưa gán bảng</span>{/if}
