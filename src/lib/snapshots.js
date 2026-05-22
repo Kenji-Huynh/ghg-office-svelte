@@ -1,15 +1,6 @@
 import * as DB from './db.js'
 import { matchesCompany } from './companies.js'
-
-/** @param {number} m @param {number} y */
-function periodKey(m, y) {
-  return `${y}-${String(m).padStart(2, '0')}`
-}
-
-/** @param {number} m @param {number} y */
-function periodLabel(m, y) {
-  return `Tháng ${m}/${y}`
-}
+import { periodKey, periodLabel } from './ghg.js'
 
 function getPeriodKeys() {
   const all = new Set()

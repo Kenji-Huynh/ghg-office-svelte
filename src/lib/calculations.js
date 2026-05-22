@@ -1,4 +1,4 @@
-import { CABIN_OPTIONS, EMP_GROUND } from './constants.js'
+import { CABIN_OPTIONS, EMP_GROUND, HOTEL_OPTIONS } from './constants.js'
 
 /**
  * @param {Array<{ km?: number, legs?: number, cabin?: number }>} legs
@@ -35,18 +35,73 @@ export function calcOtherTransportsCO2(segments) {
 }
 
 /**
+ * @param {Array<{ hotelType?: number, nights?: number, rooms?: number }>} stays
+ */
+export function calcHotelStaysCO2(stays) {
+  let total = 0
+  for (const h of stays || []) {
+    const ef = Number(h.hotelType ?? HOTEL_OPTIONS[2].value)
+    const nights = Number(h.nights || 0)
+    const rooms = Math.max(1, Number(h.rooms) || 1)
+    total += nights * rooms * ef
+  }
+  return Math.round(total * 10) / 10
+}
+
+/**
  * @param {Array<{ km?: number, legs?: number, cabin?: number }>} legs
  * @param {Array<Record<string, unknown>>} otherTransports
- * @param {number} hotelEF
- * @param {number} nights
- * @param {number} rooms
+ * @param {Array<{ hotelType?: number, nights?: number, rooms?: number }>} hotelStays
  */
-export function calcEmployeeTrip(legs, otherTransports, hotelEF, nights, rooms) {
+export function calcEmployeeTrip(legs, otherTransports, hotelStays) {
   const airCO2 = calcFlightLegsCO2(legs)
   const groundCO2 = calcOtherTransportsCO2(otherTransports)
-  const hotelCO2 = Math.round(nights * rooms * hotelEF * 10) / 10
+  const hotelCO2 = calcHotelStaysCO2(hotelStays)
   const total = Math.round((airCO2 + groundCO2 + hotelCO2) * 10) / 10
   return { airCO2, groundCO2, hotelCO2, total }
+}
+
+/** @returns {{ id: string, hotelType: number, nights: number, rooms: number, note: string }} */
+export function newHotelStay() {
+  return {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+    hotelType: HOTEL_OPTIONS[2].value,
+    nights: 0,
+    rooms: 1,
+    note: '',
+  }
+}
+
+/** Gộp dữ liệu cũ (1 khách sạn) thành mảng */
+export function migrateTripHotels(trip) {
+  if (trip.hotelStays?.length) return trip.hotelStays
+  const nights = Number(trip.nights || 0)
+  if (nights <= 0 && !trip.hotelLabel) return []
+  const label = String(trip.hotelLabel || '')
+  const match = HOTEL_OPTIONS.find((h) => label.includes(h.label.split(' (')[0]))
+  return [
+    {
+      id: `hotel-${trip.id}`,
+      hotelType: match?.value ?? HOTEL_OPTIONS[2].value,
+      nights,
+      rooms: Number(trip.rooms) || 1,
+      note: label && !label.includes('sao') ? label : '',
+    },
+  ]
+}
+
+/** @param {Record<string, unknown>} trip */
+export function formatHotelStaysDetail(trip) {
+  const stays = migrateTripHotels(trip)
+  if (!stays.length) return ''
+  return stays
+    .map((h) => {
+      const label =
+        HOTEL_OPTIONS.find((x) => x.value === Number(h.hotelType))?.label.split(' (')[0] ?? 'KS'
+      const place = h.note ? String(h.note).trim() : label
+      return `${place}: ${h.nights}đêm×${h.rooms || 1}phòng (${label})`
+    })
+    .join('; ')
 }
 
 /** Gộp dữ liệu cũ (1 xe + lít) thành mảng phương tiện */

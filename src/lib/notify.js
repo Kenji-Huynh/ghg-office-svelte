@@ -1,4 +1,5 @@
 import Swal from 'sweetalert2'
+import { larkErrorHtml, isLarkApiError } from './larkError.js'
 
 const toastMixin = Swal.mixin({
   toast: true,
@@ -16,6 +17,28 @@ export function toastOk(msg) {
 /** @param {string} msg */
 export function toastErr(msg) {
   return toastMixin.fire({ icon: 'error', title: msg })
+}
+
+/**
+ * Hiển thị lỗi chi tiết — modal có URL / mã Lark / HTTP; đồng thời log F12 → Console.
+ * @param {unknown} err
+ * @param {string} [shortTitle]
+ */
+export function showErrorDetail(err, shortTitle = 'Lỗi đồng bộ Lark') {
+  const e = err instanceof Error ? err : new Error(String(err))
+  console.error(`[${shortTitle}]`, e, isLarkApiError(err) ? err.details : undefined)
+
+  const title =
+    e.message.length > 100 ? `${e.message.slice(0, 97)}…` : e.message || shortTitle
+
+  return Swal.fire({
+    icon: 'error',
+    title: shortTitle,
+    html: `<p style="margin:0 0 10px;font-size:14px;text-align:left"><strong>${title}</strong></p>${larkErrorHtml(err)}`,
+    confirmButtonText: 'Đóng',
+    width: 640,
+    customClass: { htmlContainer: 'lark-error-swal' },
+  })
 }
 
 /**
@@ -63,4 +86,30 @@ export async function confirmAction(title, text = '') {
  */
 export function alertInfo(title, html) {
   return Swal.fire({ icon: 'info', title, html, confirmButtonText: 'Đã hiểu' })
+}
+
+/**
+ * Chọn cách import Excel: gộp thêm hoặc thay thế dữ liệu sheet.
+ * @param {string} html — HTML preview (đã escape nếu cần)
+ * @returns {Promise<'merge'|'replace'|null>}
+ */
+export async function confirmImportExcelMode(html) {
+  const r = await Swal.fire({
+    icon: 'question',
+    title: 'Import Excel vào kỳ hiện tại?',
+    html,
+    showCancelButton: true,
+    showDenyButton: true,
+    confirmButtonText: 'Gộp thêm (bỏ trùng)',
+    denyButtonText: 'Thay thế theo file',
+    cancelButtonText: 'Hủy',
+    confirmButtonColor: '#1A6B3C',
+    denyButtonColor: '#B85C00',
+    cancelButtonColor: '#6B6960',
+    reverseButtons: true,
+    width: 520,
+  })
+  if (r.isConfirmed) return 'merge'
+  if (r.isDenied) return 'replace'
+  return null
 }

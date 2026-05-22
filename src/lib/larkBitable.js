@@ -8,13 +8,26 @@
  */
 
 import { get } from 'svelte/store'
-import { equipRows, empTrips, commuteList, isEquipInReport } from './ghg.js'
-import { migrateTripTransports } from './calculations.js'
-import { COMPANIES } from './companies.js'
+import {
+  equipRows,
+  empTrips,
+  commuteList,
+  isEquipInReport,
+  currentMonth,
+  currentYear,
+  periodLabel,
+} from './ghg.js'
+import { migrateTripTransports, formatHotelStaysDetail } from './calculations.js'
+import { COMPANIES, normalizeCompany } from './companies.js'
 import { snapshotTotalsForCompany } from './snapshots.js'
+import { LarkApiError, inferLarkStep, throwLarkError } from './larkError.js'
 
 /** Tên cột — Văn phòng (Scope 1 & 2) — trùng Base */
+/** Cột kỳ — thêm vào 3 bảng Lark (Text), vd. Tháng 6 - 2026 (khớp «Kỳ đang làm» trên web) */
+export const LARK_COL_PERIOD = 'Kỳ báo cáo'
+
 export const LARK_COL_OFFICE = {
+  Ky: LARK_COL_PERIOD,
   CongTy: 'Công ty',
   ThietBi: 'Thiết bị',
   NguonPhatThai: 'Nguồn phát thải',
@@ -28,6 +41,7 @@ export const LARK_COL_OFFICE = {
 
 /** Tên cột — Nhân viên (Scope 3) */
 export const LARK_COL_TRIP = {
+  Ky: LARK_COL_PERIOD,
   CongTy: 'Công ty',
   HoTen: 'Họ và tên',
   MaNv: 'Mã NV',
@@ -43,10 +57,12 @@ export const LARK_COL_TRIP = {
   Co2LuuTru: 'CO₂ lưu trú (kg)',
   Tong: 'Tổng (kg CO₂e)',
   PhuongTienChiTiet: 'Phương tiện chi tiết',
+  LuuTruChiTiet: 'Lưu trú chi tiết',
 }
 
 /** Tên cột — Đi làm hằng ngày */
 export const LARK_COL_COMMUTE = {
+  Ky: LARK_COL_PERIOD,
   CongTy: 'Công ty',
   HoTen: 'Họ và tên',
   MaNv: 'Mã NV',
@@ -127,6 +143,7 @@ function formatTripTransportDetail(trip) {
 
 function officeSig(f) {
   return [
+    norm(f[C.Ky]),
     norm(f[C.CongTy]),
     norm(f[C.ThietBi]),
     norm(f[C.NguonPhatThai]),
@@ -142,6 +159,7 @@ function officeSig(f) {
 /** @param {Record<string, unknown>} f */
 function tripSig(f) {
   return [
+    norm(f[T.Ky]),
     norm(f[T.CongTy]),
     norm(f[T.MaNv]),
     norm(f[T.TenChuyen]),
@@ -156,6 +174,7 @@ function tripSig(f) {
 /** @param {Record<string, unknown>} f */
 function commuteSig(f) {
   return [
+    norm(f[M.Ky]),
     norm(f[M.CongTy]),
     norm(f[M.MaNv]),
     norm(f[M.PhuongTien]),
@@ -165,13 +184,15 @@ function commuteSig(f) {
   ].join('|')
 }
 
-/** @param {unknown[]} equip @param {unknown[]} trips @param {unknown[]} commute */
-function buildLarkRecordsFromRows(equip, trips, commute) {
+/** @param {unknown[]} equip @param {unknown[]} trips @param {unknown[]} commute @param {string} periodText */
+function buildLarkRecordsFromRows(equip, trips, commute, periodText) {
+  const ky = periodText || ''
   const officeRows = equip.filter(isEquipInReport)
   const officeFields = officeRows.map((r) => {
     const tot = r.volume && r.ef ? (r.volume * r.ef) / 1000 : 0
     return fieldsAllText({
-      [C.CongTy]: r.company || '',
+      [C.Ky]: ky,
+      [C.CongTy]: normalizeCompany(r.company) || '',
       [C.ThietBi]: r.equipment || '',
       [C.NguonPhatThai]: r.source || '',
       [C.Scope]: r.scope ?? '',
@@ -185,7 +206,8 @@ function buildLarkRecordsFromRows(equip, trips, commute) {
 
   const tripRows = trips.map((trip) =>
     fieldsAllText({
-      [T.CongTy]: trip.company || '',
+      [T.Ky]: ky,
+      [T.CongTy]: normalizeCompany(trip.company) || '',
       [T.HoTen]: trip.name || '',
       [T.MaNv]: trip.empId || '',
       [T.PhongBan]: trip.dept || '',
@@ -200,12 +222,14 @@ function buildLarkRecordsFromRows(equip, trips, commute) {
       [T.Co2LuuTru]: trip.co2Hotel ?? '',
       [T.Tong]: trip.co2Total ?? '',
       [T.PhuongTienChiTiet]: formatTripTransportDetail(trip),
+      [T.LuuTruChiTiet]: formatHotelStaysDetail(trip),
     }),
   )
 
   const commuteRows = commute.map((c) =>
     fieldsAllText({
-      [M.CongTy]: c.company || '',
+      [M.Ky]: ky,
+      [M.CongTy]: normalizeCompany(c.company) || '',
       [M.HoTen]: c.name || '',
       [M.MaNv]: c.empId || '',
       [M.PhongBan]: c.dept || '',
@@ -221,14 +245,56 @@ function buildLarkRecordsFromRows(equip, trips, commute) {
   return { officeFields, tripRows, commuteRows }
 }
 
-/** Base URL: dev = proxy Vite; production (Vercel) = /api/lark */
+/** Trình duyệt đang chạy local / tunnel (không phải Vercel production). */
+function isLocalBrowserHost() {
+  if (typeof window === 'undefined') return import.meta.env.DEV
+  const h = window.location.hostname
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h.endsWith('.trycloudflare.com') ||
+    import.meta.env.DEV
+  )
+}
+
+/** Base URL: dev/tunnel = proxy Vite; production (Vercel) = /api/lark */
 export function larkOpenApiPrefix() {
   const v = import.meta.env.VITE_LARK_API_BASE
   const custom = v != null ? String(v).trim().replace(/\/$/, '') : ''
-  // Không dùng /lark-open-api trên production (chỉ có khi npm run dev)
+  if (custom.startsWith('http://') || custom.startsWith('https://')) {
+    return custom
+  }
+  // Không dùng /lark-open-api trên Vercel (chỉ khi npm run dev / preview / tunnel)
   if (custom && custom !== '/lark-open-api') return custom
-  if (import.meta.env.DEV) return '/lark-open-api'
+  if (isLocalBrowserHost()) return '/lark-open-api'
   return '/api/lark'
+}
+
+/** @param {unknown} err @param {string} url @param {string} [path] */
+function wrapLarkNetworkError(err, url, path = '') {
+  const original = err instanceof Error ? err.message : String(err)
+  const prefix = larkOpenApiPrefix()
+  const step = inferLarkStep(path)
+
+  if (!/failed to fetch/i.test(original)) {
+    throw new LarkApiError(original, { step, url, apiPrefix: prefix, original })
+  }
+
+  let message = `Không kết nối proxy Lark — Failed to fetch`
+  if (/content.decoding|ERR_CONTENT_DECODING/i.test(original)) {
+    message =
+      'Lỗi giải nén phản hồi (Content-Encoding). Khởi động lại npm run dev — đã sửa proxy; nếu Vercel: redeploy.'
+  } else if (prefix.startsWith('http')) {
+    message =
+      'Không gọi được Lark (CORS). Trên Vercel xóa VITE_LARK_API_BASE trỏ thẳng open.larksuite.com — dùng /api/lark.'
+  } else if (import.meta.env.DEV) {
+    message = `Không kết nối proxy Lark. Giữ "npm run dev" chạy; F5. Tunnel: npm run tunnel + dev.`
+  } else if (isLocalBrowserHost()) {
+    message = 'Không kết nối proxy. Chạy npm run dev — không mở file HTML trực tiếp.'
+  } else {
+    message = 'Không kết nối /api/lark. Redeploy Vercel; xóa VITE_LARK_API_BASE=/lark-open-api trên Vercel.'
+  }
+  throw new LarkApiError(message, { step, url, apiPrefix: prefix, original })
 }
 
 /**
@@ -239,7 +305,14 @@ export function larkOpenApiPrefix() {
 async function larkFetch(path, init = {}, prefixOverride) {
   const prefix = prefixOverride ?? larkOpenApiPrefix()
   const url = path.startsWith('http') ? path : `${prefix}${path}`
-  const res = await fetch(url, init)
+  const method = init.method || 'GET'
+  const step = inferLarkStep(path, method)
+  let res
+  try {
+    res = await fetch(url, init)
+  } catch (err) {
+    wrapLarkNetworkError(err, url, path)
+  }
   const text = await res.text()
   /** @type {Record<string, unknown>} */
   let json = {}
@@ -249,23 +322,53 @@ async function larkFetch(path, init = {}, prefixOverride) {
     json = {}
   }
 
+  const larkCode = json.code
+  const larkMsg = typeof json.msg === 'string' ? json.msg : ''
+  const responseSnippet = text.trim().slice(0, 480)
+
   if (!res.ok) {
     const looksLikeSpaHtml =
       res.status === 404 &&
       (text.trimStart().startsWith('<!') || /<!DOCTYPE/i.test(text) || text.includes('<html'))
     if (looksLikeSpaHtml && prefix.startsWith('/')) {
-      throw new Error(
-        'HTTP 404 — route /api/lark chưa chạy trên server. Redeploy Vercel (cần file api/lark.js + vercel.json có "handle": "filesystem"). Xóa biến VITE_LARK_API_BASE=/lark-open-api trên Vercel nếu có.',
+      throwLarkError(
+        'HTTP 404 — /api/lark trả về trang HTML (SPA). Redeploy Vercel + vercel.json; xóa VITE_LARK_API_BASE=/lark-open-api.',
+        {
+          step,
+          url,
+          method,
+          httpStatus: res.status,
+          apiPrefix: prefix,
+          responseSnippet,
+        },
       )
     }
     if (res.status === 404 && prefix.startsWith('/')) {
-      throw new Error(`HTTP 404 — Lark API: ${url}`)
+      throwLarkError(`HTTP 404 — không tìm thấy route Lark: ${url}`, {
+        step,
+        url,
+        method,
+        httpStatus: 404,
+        apiPrefix: prefix,
+        larkCode,
+        larkMsg,
+        responseSnippet,
+      })
     }
-    const msg = typeof json.msg === 'string' ? json.msg : ''
-    throw new Error(msg ? `HTTP ${res.status}: ${msg}` : `HTTP ${res.status}`)
+    const title = larkMsg ? `HTTP ${res.status}: ${larkMsg}` : `HTTP ${res.status}`
+    throwLarkError(title, {
+      step,
+      url,
+      method,
+      httpStatus: res.status,
+      apiPrefix: prefix,
+      larkCode,
+      larkMsg,
+      responseSnippet,
+    })
   }
 
-  return { res, json }
+  return { res, json, url, step, method, apiPrefix: prefix }
 }
 
 /**
@@ -274,8 +377,9 @@ async function larkFetch(path, init = {}, prefixOverride) {
  * @param {string} appSecret
  */
 export async function fetchTenantAccessToken(prefix, appId, appSecret) {
-  const { json } = await larkFetch(
-    '/open-apis/auth/v3/tenant_access_token/internal',
+  const path = '/open-apis/auth/v3/tenant_access_token/internal'
+  const { json, url, step, method, apiPrefix } = await larkFetch(
+    path,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
@@ -283,10 +387,111 @@ export async function fetchTenantAccessToken(prefix, appId, appSecret) {
     },
     prefix,
   )
-  if (json.code !== 0) throw new Error(String(json.msg || `Lark token code ${json.code}`))
+  if (json.code !== 0) {
+    throwLarkError(String(json.msg || `Lark từ chối token (code ${json.code})`), {
+      step,
+      url,
+      method,
+      apiPrefix,
+      larkCode: json.code,
+      larkMsg: String(json.msg || ''),
+    })
+  }
   const token = json.tenant_access_token
-  if (!token) throw new Error('Không nhận được tenant_access_token')
+  if (!token) {
+    throwLarkError('Không nhận được tenant_access_token — kiểm tra App ID / Secret trên Lark Open Platform', {
+      step,
+      url,
+      method,
+      apiPrefix,
+      larkCode: json.code,
+    })
+  }
   return /** @type {string} */ (token)
+}
+
+/**
+ * @param {string} prefix
+ * @param {string} token
+ * @param {string} baseAppToken
+ * @param {string} tableId
+ */
+async function fetchLarkTableFieldNames(prefix, token, baseAppToken, tableId) {
+  /** @type {string[]} */
+  const names = []
+  let pageToken = ''
+  for (let i = 0; i < 50; i++) {
+    const qs = new URLSearchParams({ page_size: '100' })
+    if (pageToken) qs.set('page_token', pageToken)
+    const path = `/open-apis/bitable/v1/apps/${encodeURIComponent(baseAppToken)}/tables/${encodeURIComponent(tableId)}/fields?${qs.toString()}`
+    const { json } = await larkFetch(
+      path,
+      { method: 'GET', headers: { Authorization: `Bearer ${token}` } },
+      prefix,
+    )
+    if (json.code !== 0) break
+    const items = Array.isArray(json.data?.items) ? json.data.items : []
+    for (const item of items) {
+      const n = item?.field_name
+      if (n != null && String(n).trim()) names.push(String(n).trim())
+    }
+    if (!json.data?.has_more) break
+    pageToken = String(json.data?.page_token || '')
+    if (!pageToken) break
+  }
+  return names
+}
+
+/** Tên cột kỳ trên Base (ưu tiên đúng tên app, rồi alias cũ) */
+const PERIOD_FIELD_ALIASES = [LARK_COL_PERIOD, 'Kỳ', 'Kỳ (mã)']
+
+/** @param {string[]} onBase */
+function periodColumnOnBase(onBase) {
+  return PERIOD_FIELD_ALIASES.find((a) => onBase.includes(a)) ?? null
+}
+
+/**
+ * Chỉ giữ cột tồn tại trên Base. «Kỳ báo cáo» tùy chọn — không có cột kỳ thì bỏ qua.
+ * @param {Record<string, string>} row
+ * @param {string[]} onBase
+ */
+function alignRowToBaseColumns(row, onBase) {
+  const allowed = new Set(onBase)
+  const periodCol = periodColumnOnBase(onBase)
+  /** @type {Record<string, string>} */
+  const out = {}
+  for (const [k, v] of Object.entries(row)) {
+    if (k === LARK_COL_PERIOD) {
+      if (periodCol) out[periodCol] = v
+      continue
+    }
+    if (allowed.has(k)) out[k] = v
+  }
+  return out
+}
+
+/** @param {Record<string, string>[]} rows @param {string[]} onBase */
+function filterRecordsForBase(rows, onBase) {
+  const omitted = new Set()
+  const filtered = rows
+    .map((row) => {
+      const aligned = alignRowToBaseColumns(row, onBase)
+      for (const k of Object.keys(row)) {
+        if (!(k in aligned)) omitted.add(k)
+      }
+      return aligned
+    })
+    .filter((r) => Object.keys(r).length > 0)
+  return { filtered, omitted: [...omitted] }
+}
+
+/** @param {string[]} sent @param {string[]} onBase */
+function fieldNamesMissingOnBase(sent, onBase) {
+  const set = new Set(onBase)
+  return sent.filter((k) => {
+    if (k === LARK_COL_PERIOD && periodColumnOnBase(onBase)) return false
+    return !set.has(k)
+  })
 }
 
 /**
@@ -298,11 +503,28 @@ export async function fetchTenantAccessToken(prefix, appId, appSecret) {
  */
 async function batchCreateRecords(prefix, token, baseAppToken, tableId, fieldsList) {
   if (!tableId || fieldsList.length === 0) return 0
+  const onBase = await fetchLarkTableFieldNames(prefix, token, baseAppToken, tableId)
+  const { filtered: alignedList, omitted } = filterRecordsForBase(fieldsList, onBase)
+  if (omitted.length) {
+    console.info(`[Lark] Bảng ${tableId} — bỏ cột không có trên Base:`, omitted.join(', '))
+  }
+  if (alignedList.length === 0) {
+    throwLarkError('Không còn cột nào khớp Base để ghi — kiểm tra tên cột trên Lark.', {
+      step: 'Ghi bảng',
+      tableId,
+      sentFields: fieldsList[0] ? Object.keys(fieldsList[0]) : [],
+      fieldsOnBase: onBase,
+      missingOnBase: fieldNamesMissingOnBase(
+        fieldsList[0] ? Object.keys(fieldsList[0]) : [],
+        onBase,
+      ),
+    })
+  }
   const path = `/open-apis/bitable/v1/apps/${encodeURIComponent(baseAppToken)}/tables/${encodeURIComponent(tableId)}/records/batch_create`
   let total = 0
-  for (const part of chunk(fieldsList, 80)) {
+  for (const part of chunk(alignedList, 80)) {
     const body = { records: part.map((fields) => ({ fields })) }
-    const { json } = await larkFetch(
+    const { json, url, step, method, apiPrefix } = await larkFetch(
       path,
       {
         method: 'POST',
@@ -315,7 +537,32 @@ async function batchCreateRecords(prefix, token, baseAppToken, tableId, fieldsLi
       prefix,
     )
     if (json.code !== 0) {
-      throw new Error(String(json.msg || `Lark batch_create ${json.code}`))
+      const larkMsg = String(json.msg || '')
+      const isFieldName =
+        json.code === 1254045 || /fieldnamenotfound/i.test(larkMsg)
+      /** @type {string[]} */
+      const sentFields = part[0] ? Object.keys(part[0]) : []
+      let missingOnBase = []
+      let fieldsOnBase = []
+      if (isFieldName && sentFields.length) {
+        fieldsOnBase = await fetchLarkTableFieldNames(prefix, token, baseAppToken, tableId)
+        missingOnBase = fieldNamesMissingOnBase(sentFields, fieldsOnBase)
+      }
+      const title = missingOnBase.length
+        ? `FieldNameNotFound — thiếu/sai tên cột: ${missingOnBase.join(', ')}`
+        : larkMsg || `Lark batch_create code ${json.code}`
+      throwLarkError(title, {
+        step,
+        url,
+        method,
+        apiPrefix,
+        tableId,
+        larkCode: json.code,
+        larkMsg,
+        sentFields,
+        missingOnBase,
+        fieldsOnBase,
+      })
     }
     const rec = json.data?.records
     total += Array.isArray(rec) ? rec.length : part.length
@@ -341,7 +588,7 @@ async function fetchExistingSignatures(prefix, token, baseAppToken, tableId, sig
     qs.set('page_size', '500')
     if (pageToken) qs.set('page_token', pageToken)
     const path = `${base}?${qs.toString()}`
-    const { json } = await larkFetch(
+    const { json, url, step, method, apiPrefix } = await larkFetch(
       path,
       {
         method: 'GET',
@@ -349,7 +596,17 @@ async function fetchExistingSignatures(prefix, token, baseAppToken, tableId, sig
       },
       prefix,
     )
-    if (json.code !== 0) throw new Error(String(json.msg || `Lark list records ${json.code}`))
+    if (json.code !== 0) {
+      throwLarkError(String(json.msg || `Lark đọc bảng code ${json.code}`), {
+        step,
+        url,
+        method,
+        apiPrefix,
+        tableId,
+        larkCode: json.code,
+        larkMsg: String(json.msg || ''),
+      })
+    }
     const items = Array.isArray(json.data?.items) ? json.data.items : []
     for (const item of items) {
       const fields = /** @type {Record<string, unknown>} */ (item?.fields || {})
@@ -371,7 +628,8 @@ const M = LARK_COL_COMMUTE
  * @returns {{ officeFields: Record<string, string>[], tripRows: Record<string, string>[], commuteRows: Record<string, string>[] }}
  */
 export function buildLarkPeriodRecords() {
-  return buildLarkRecordsFromRows(get(equipRows), get(empTrips), get(commuteList))
+  const label = periodLabel(get(currentMonth), get(currentYear))
+  return buildLarkRecordsFromRows(get(equipRows), get(empTrips), get(commuteList), label)
 }
 
 /**
@@ -451,6 +709,7 @@ export async function syncSnapshotToLark(snap, s) {
     snap.equip,
     snap.emptrips,
     snap.commute,
+    snap.label,
   )
 
   const existingOffice = await fetchExistingSignatures(prefix, token, appToken, tOffice, officeSig)
@@ -533,6 +792,8 @@ export async function syncSnapshotToLark(snap, s) {
 export const LARK_FIELD_HELP = {
   office: [
     'ID — không chỉnh / không gửi từ app',
+    `${LARK_COL_PERIOD} (tùy chọn — chỉ gửi nếu Base có cột «Kỳ báo cáo» hoặc «Kỳ»)`,
+    LARK_COL_OFFICE.CongTy,
     LARK_COL_OFFICE.ThietBi,
     LARK_COL_OFFICE.NguonPhatThai,
     LARK_COL_OFFICE.Scope,
@@ -544,6 +805,8 @@ export const LARK_FIELD_HELP = {
   ],
   trips: [
     'ID — không chỉnh / không gửi từ app',
+    `${LARK_COL_PERIOD} (tùy chọn)`,
+    LARK_COL_TRIP.CongTy,
     LARK_COL_TRIP.HoTen,
     LARK_COL_TRIP.MaNv,
     LARK_COL_TRIP.PhongBan,
@@ -557,9 +820,13 @@ export const LARK_FIELD_HELP = {
     LARK_COL_TRIP.Co2MatDat,
     LARK_COL_TRIP.Co2LuuTru,
     LARK_COL_TRIP.Tong,
+    LARK_COL_TRIP.PhuongTienChiTiet,
+    LARK_COL_TRIP.LuuTruChiTiet,
   ],
   commute: [
     'ID — không chỉnh / không gửi từ app',
+    `${LARK_COL_PERIOD} (tùy chọn)`,
+    LARK_COL_COMMUTE.CongTy,
     LARK_COL_COMMUTE.HoTen,
     LARK_COL_COMMUTE.MaNv,
     LARK_COL_COMMUTE.PhongBan,

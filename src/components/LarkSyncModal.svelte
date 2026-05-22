@@ -8,7 +8,9 @@
     LARK_COL_TRIP as Tr,
     LARK_COL_COMMUTE as Co,
   } from '../lib/larkBitable.js'
-  import { toastOk, toastErr } from '../lib/notify.js'
+  import { toastOk, toastErr, showErrorDetail } from '../lib/notify.js'
+  import { getLastLarkErrorDetails, LarkApiError } from '../lib/larkError.js'
+  import { larkOpenApiPrefix } from '../lib/larkBitable.js'
 
   let { open = $bindable(false) } = $props()
 
@@ -32,6 +34,15 @@
       commute: !!s.tableCommute?.trim(),
     }
   })
+
+  function showLastLarkError() {
+    const d = getLastLarkErrorDetails()
+    if (!d) {
+      toastErr('Chưa có lỗi Lark trong phiên này — thử Gửi lên Lark Base trước.')
+      return
+    }
+    showErrorDetail(new LarkApiError('Lỗi Lark gần nhất (phiên hiện tại)', d), 'Chi tiết lỗi Lark')
+  }
 
   async function onSync() {
     const s = loadLarkSettings()
@@ -60,7 +71,7 @@
         open = false
       }
     } catch (e) {
-      toastErr(/** @type {Error} */ (e).message || String(e))
+      await showErrorDetail(e, 'Gửi Lark Base thất bại')
     } finally {
       busy = false
     }
@@ -81,8 +92,9 @@
       </div>
       <div class="modal-body modal-body--scroll">
         <p class="lark-preview-intro">
-          Mỗi lần bấm gửi, app <strong>thêm bản ghi mới</strong> vào Lark Base (không gửi cột ID). Dưới đây là nội dung
-          kỳ này sẽ được đẩy lên — trùng với dữ liệu đã có trên Base sẽ bị bỏ qua khi đồng bộ.
+          Mỗi lần bấm gửi, app <strong>thêm bản ghi mới</strong> vào Lark Base (không gửi cột ID). Chỉ gửi cột
+          <strong>đã có trên Base</strong>; «Kỳ báo cáo» là tùy chọn (không có cột kỳ trên Base thì bỏ qua). Trùng dữ liệu
+          sẽ bị bỏ qua khi đồng bộ.
         </p>
         <div class="lark-target-chips" aria-label="Bảng đích đã cấu hình">
           <span class="lark-target-chip" class:inactive={!targets.office}>
@@ -205,10 +217,18 @@
           {/if}
         </section>
       </div>
-      <div class="modal-foot lark-modal-foot lark-modal-foot--simple">
-        <button type="button" class="btn btn-primary" onclick={onSync} disabled={busy}>
-          {busy ? 'Đang gửi lên Lark Base…' : 'Gửi lên Lark Base'}
-        </button>
+      <div class="modal-foot lark-modal-foot">
+        <p class="lark-debug-hint">
+          Đường API: <code>{larkOpenApiPrefix()}</code> · Khi lỗi: bấm <strong>Chi tiết lỗi</strong> hoặc mở <strong>F12 → Console</strong>.
+        </p>
+        <div class="lark-modal-foot-actions">
+          <button type="button" class="btn btn-primary" onclick={onSync} disabled={busy}>
+            {busy ? 'Đang gửi lên Lark Base…' : 'Gửi lên Lark Base'}
+          </button>
+          <button type="button" class="btn" onclick={showLastLarkError} disabled={busy}>
+            Chi tiết lỗi
+          </button>
+        </div>
       </div>
     </div>
   </div>

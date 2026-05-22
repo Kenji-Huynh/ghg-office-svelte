@@ -5,38 +5,24 @@
     currentMonth,
     currentYear,
     periodLabel,
-    selectedCompany,
     dashboardMode,
   } from '../lib/ghg.js'
-  import { COMPANIES, ALL_COMPANIES } from '../lib/companies.js'
   import BarBlock from './BarBlock.svelte'
 
   const dashView = $derived($dashboardMode === 'year' ? $dashYear : $dash)
-  const companyLabel = $derived(
-    $selectedCompany ? $selectedCompany : 'Tất cả công ty',
-  )
 </script>
 
 <div class="page-title">Tổng quan phát thải GHG</div>
 <div class="page-sub">
   {#if $dashboardMode === 'year'}
-    Năm <strong>{$currentYear}</strong> · {companyLabel}
+    Năm <strong>{$currentYear}</strong>
   {:else}
-    Kỳ <strong>{periodLabel($currentMonth, $currentYear)}</strong> · {companyLabel}
+    Kỳ <strong>{periodLabel($currentMonth, $currentYear)}</strong>
   {/if}
 </div>
 
 <div class="dash-toolbar card">
   <div class="card-body dash-toolbar-inner">
-    <div class="field">
-      <label>Công ty</label>
-      <select bind:value={$selectedCompany}>
-        <option value={ALL_COMPANIES}>Tất cả công ty</option>
-        {#each COMPANIES as co}
-          <option value={co}>{co}</option>
-        {/each}
-      </select>
-    </div>
     <div class="field">
       <label>Chế độ xem</label>
       <div class="dash-mode-toggle">

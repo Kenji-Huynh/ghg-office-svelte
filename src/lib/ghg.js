@@ -1,7 +1,7 @@
 import { writable, derived, get } from 'svelte/store'
 import * as DB from './db.js'
 import { EMISSION_SOURCES } from './constants.js'
-import { ALL_COMPANIES, matchesCompany } from './companies.js'
+import { ALL_COMPANIES, COMPANIES, matchesCompany, normalizeCompany } from './companies.js'
 
 const now = new Date()
 
@@ -10,9 +10,9 @@ export function periodKey(m, y) {
   return `${y}-${String(m).padStart(2, '0')}`
 }
 
-/** @param {number} m @param {number} y */
+/** Hiển thị kỳ — trùng cột Lark «Kỳ báo cáo», vd. Tháng 6 - 2026 */
 export function periodLabel(m, y) {
-  return `Tháng ${m}/${y}`
+  return `Tháng ${m} - ${y}`
 }
 
 export const currentMonth = writable(now.getMonth() + 1)
@@ -163,8 +163,8 @@ export function deleteEmpTripById(id) {
 }
 
 /** @param {Record<string, unknown>} entry */
-export function addEmpTrip(entry) {
-  const sig = [
+function empTripSignature(entry) {
+  return [
     normText(entry.empId),
     normText(entry.trip),
     normText(entry.dateFrom),
@@ -172,26 +172,35 @@ export function addEmpTrip(entry) {
     normText(entry.from),
     normText(entry.to),
   ].join('|')
+}
+
+/** @param {Record<string, unknown>} entry */
+export function addEmpTrip(entry) {
+  const sig = empTripSignature(entry)
 
   let added = false
   empTrips.update((t) => {
-    const dup = t.some((x) => {
-      const xSig = [
-        normText(x.empId),
-        normText(x.trip),
-        normText(x.dateFrom),
-        normText(x.dateTo),
-        normText(x.from),
-        normText(x.to),
-      ].join('|')
-      return xSig === sig
-    })
+    const dup = t.some((x) => empTripSignature(x) === sig)
     if (dup) return t
     added = true
     return [entry, ...t]
   })
   persistEmp()
   return added
+}
+
+/** @param {string} id @param {Record<string, unknown>} entry */
+export function updateEmpTripById(id, entry) {
+  const sig = empTripSignature(entry)
+  let updated = false
+  empTrips.update((t) => {
+    const dup = t.some((x) => x.id !== id && empTripSignature(x) === sig)
+    if (dup) return t
+    updated = true
+    return t.map((x) => (x.id === id ? { ...entry, id } : x))
+  })
+  persistEmp()
+  return updated
 }
 
 /** @param {string} id */
@@ -351,26 +360,32 @@ export function exportAllCSV() {
   let csv = `Kỳ báo cáo: ${periodLabel(m, y)}\n\n`
   csv += '=== STATIONARY COMBUSTION (SCOPE 1 & 2) ===\n'
   csv +=
-    'Thiết bị,Nguồn phát thải,Scope,Đơn vị,Khối lượng,EF (kg),EF Reference,Tổng GHG (tấn CO₂e)\n'
+    'Thiết bị,Công ty,Nguồn phát thải,Scope,Đơn vị,Khối lượng,EF (kg),EF Reference,Tổng GHG (tấn CO₂e)\n'
   for (const r of $e.filter(isEquipInReport)) {
     const tot = r.volume && r.ef ? +((r.volume * r.ef) / 1000).toFixed(6) : 0
-    csv += `"${r.equipment || ''}","${r.source || ''}",${r.scope},"${r.unit || ''}",${r.volume || 0},${r.ef || 0},"${r.efRef || ''}",${tot}\n`
+    csv += `"${r.equipment || ''}","${normalizeCompany(r.company) || ''}","${r.source || ''}",${r.scope},"${r.unit || ''}",${r.volume || 0},${r.ef || 0},"${r.efRef || ''}",${tot}\n`
   }
   csv += '\n=== CHUYẾN CÔNG TÁC NHÂN VIÊN (SCOPE 3.6) ===\n'
-  csv += 'Họ tên,Mã NV,Phòng ban,Chuyến đi,Từ,Đến,Ngày đi,CO₂ Bay (kg),CO₂ Xe/Tàu (kg),CO₂ KS (kg),Tổng (kg)\n'
+  csv += 'Họ tên,Mã NV,Công ty,Phòng ban,Chuyến đi,Từ,Đến,Ngày đi,CO₂ Bay (kg),CO₂ Xe/Tàu (kg),CO₂ KS (kg),Tổng (kg)\n'
   for (const t of $t) {
-    csv += `"${t.name}","${t.empId}","${t.dept}","${t.trip}","${t.from || ''}","${t.to || ''}","${t.dateFrom || ''}",${t.co2Air || 0},${t.co2Ground || 0},${t.co2Hotel || 0},${t.co2Total || 0}\n`
+    csv += `"${t.name}","${t.empId}","${normalizeCompany(t.company) || ''}","${t.dept}","${t.trip}","${t.from || ''}","${t.to || ''}","${t.dateFrom || ''}",${t.co2Air || 0},${t.co2Ground || 0},${t.co2Hotel || 0},${t.co2Total || 0}\n`
   }
   csv += '\n=== ĐI LÀM HÀNG NGÀY (SCOPE 3.7) ===\n'
-  csv += 'Họ tên,Mã NV,Phòng ban,Phương tiện,Km 1 chiều,Ngày/tháng,WFH/tháng,Carpool,CO₂e (kg)\n'
+  csv += 'Họ tên,Mã NV,Công ty,Phòng ban,Phương tiện,Km 1 chiều,Ngày/tháng,WFH/tháng,Carpool,CO₂e (kg)\n'
   for (const c of $c) {
-    csv += `"${c.name}","${c.empId}","${c.dept || ''}","${c.vehicle}",${c.km},${c.days},${c.wfh || 0},${c.carpool || 1},${c.co2 || 0}\n`
+    csv += `"${c.name}","${c.empId}","${normalizeCompany(c.company) || ''}","${c.dept || ''}","${c.vehicle}",${c.km},${c.days},${c.wfh || 0},${c.carpool || 1},${c.co2 || 0}\n`
   }
   return { csv: '\uFEFF' + csv, filename: `ghg_${pk}_${new Date().toISOString().slice(0, 10)}.csv` }
 }
 
 export function exportBackupJSON() {
-  const allData = { offSettings: get(offSettings), exportedAt: new Date().toISOString(), periods: {} }
+  const allData = {
+    schemaVersion: 2,
+    companies: [...COMPANIES],
+    offSettings: get(offSettings),
+    exportedAt: new Date().toISOString(),
+    periods: {},
+  }
   for (const pk of getPeriodKeys()) {
     allData.periods[pk] = {
       equip: DB.load(`ghg-equip-${pk}`) || [],
@@ -400,7 +415,11 @@ export function importBackup(data) {
     if (legacy.commuteList) DB.save(dataKey('commute'), legacy.commuteList)
   }
   if (data && typeof data === 'object' && 'offSettings' in data && data.offSettings) {
-    offSettings.set(/** @type {any} */ (data).offSettings)
+    const os = /** @type {{ company?: string, location?: string }} */ (data).offSettings
+    offSettings.set({
+      company: normalizeCompany(os.company) || os.company || '',
+      location: os.location ?? '',
+    })
     DB.save('ghg-offsettings', get(offSettings))
   }
   loadPeriodData()

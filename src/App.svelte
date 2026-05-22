@@ -15,10 +15,15 @@
     currentPK,
     periodLabel,
     periodTotalsForKey,
+    selectedCompany,
   } from './lib/ghg.js'
+  import CompanySelect from './components/CompanySelect.svelte'
   import { exportCurrentPeriodExcel, exportPeriodExcelTemplate } from './lib/exportPeriodExcel.js'
-  import { importPeriodExcelAndApply } from './lib/importPeriodExcel.js'
-  import { toastOk, confirmAction, toastErr } from './lib/notify.js'
+  import {
+    previewPeriodExcelImport,
+    importPeriodExcelAndApply,
+  } from './lib/importPeriodExcel.js'
+  import { toastOk, confirmAction, confirmImportExcelMode, toastErr } from './lib/notify.js'
   import Dashboard from './components/Dashboard.svelte'
   import OfficePage from './components/OfficePage.svelte'
   import EmployeePage from './components/EmployeePage.svelte'
@@ -98,35 +103,31 @@
     const input = /** @type {HTMLInputElement} */ (e.currentTarget)
     const file = input.files?.[0]
     if (!file) return
-    const ok = await confirmAction(
-      'Import Excel vào kỳ hiện tại?',
-      'Các sheet có trong file sẽ cập nhật: Văn phòng (dòng đã tổng hợp), Chuyến CT, Đi làm. Các dòng thiết bị nháp (chưa ✓) được giữ. File phải cùng cấu trúc với Xuất Excel hoặc Mẫu Excel.',
-    )
-    if (!ok) {
-      input.value = ''
-      return
-    }
     try {
       const buf = await file.arrayBuffer()
-      const r = await importPeriodExcelAndApply(buf)
-      const parts = []
-      if (r.equip !== null) parts.push(`Văn phòng: ${r.equip} dòng`)
-      if (r.trips !== null) parts.push(`Chuyến CT: ${r.trips}`)
-      if (r.commutes !== null) parts.push(`Đi làm: ${r.commutes}`)
+      const { html } = await previewPeriodExcelImport(buf)
+      const mode = await confirmImportExcelMode(html)
+      if (!mode) {
+        input.value = ''
+        return
+      }
+      const r = await importPeriodExcelAndApply(buf, { mode })
+      const added = []
+      if (r.addedEquip > 0) added.push(`+${r.addedEquip} văn phòng`)
+      if (r.addedTrips > 0) added.push(`+${r.addedTrips} chuyến CT`)
+      if (r.addedCommutes > 0) added.push(`+${r.addedCommutes} đi làm`)
       const skipped = []
-      if (r.skippedEquip > 0) skipped.push(`Văn phòng bỏ trùng: ${r.skippedEquip}`)
-      if (r.skippedTrips > 0) skipped.push(`Chuyến CT bỏ trùng: ${r.skippedTrips}`)
-      if (r.skippedCommutes > 0) skipped.push(`Đi làm bỏ trùng: ${r.skippedCommutes}`)
-      if (skipped.length > 0) {
-        toastErr(
-          `Import Excel có dữ liệu trùng ở: ${skipped.join(' · ')}. Các dòng trùng đã bị bỏ qua, chỉ giữ dòng mới.`,
-        )
+      if (r.skippedEquip > 0) skipped.push(`VP trùng: ${r.skippedEquip}`)
+      if (r.skippedTrips > 0) skipped.push(`CT trùng: ${r.skippedTrips}`)
+      if (r.skippedCommutes > 0) skipped.push(`Đi làm trùng: ${r.skippedCommutes}`)
+      const modeLabel = mode === 'replace' ? 'Thay thế' : 'Gộp thêm'
+      let msg = `${modeLabel}: ${added.length ? added.join(' · ') : 'không có dòng mới'}`
+      if (skipped.length) msg += ` (${skipped.join(' · ')})`
+      if (r.warnings.length) {
+        toastOk(msg)
+        toastErr(`Cảnh báo: ${r.warnings.slice(0, 2).join(' · ')}${r.warnings.length > 2 ? '…' : ''}`)
       } else {
-        toastOk(
-          parts.length
-            ? `Import Excel xong — ${parts.join(' · ')}`
-            : 'Không có sheet dữ liệu nào được cập nhật (thiếu tên sheet hoặc cột?)',
-        )
+        toastOk(msg)
       }
     } catch (err) {
       console.error(err)
@@ -210,7 +211,18 @@
       {/each}
     </select>
     <button type="button" class="btn-period" onclick={() => shift(1)} aria-label="Kỳ sau">›</button>
-    <span class="period-badge">{getPeriodKeys().length} kỳ</span>
+    <span class="period-active" title="Mọi dữ liệu nhập / lưu / Lark đều thuộc kỳ này">
+      Kỳ đang làm: <strong>{periodLabel($currentMonth, $currentYear)}</strong>
+    </span>
+    <span class="period-badge" title="Số kỳ đã có dữ liệu">{getPeriodKeys().length} kỳ</span>
+    <CompanySelect
+      bind:value={$selectedCompany}
+      showAll={true}
+      hideLabel={true}
+      compact={true}
+      id="global-company"
+      title="Lọc theo công ty — Tất cả công ty = xem hết"
+    />
   </div>
   <aside class="top-bar-right data-toolbar" aria-label="Xuất báo cáo và sao lưu dữ liệu">
     <p class="data-toolbar-hint">
@@ -236,7 +248,7 @@
       <button
         type="button"
         class="btn-data"
-        title="Ghi đè dữ liệu kỳ hiện tại từ file .xlsx (cùng format xuất / mẫu)"
+        title="Upload file .xlsx (mẫu / xuất) — xem trước, gộp thêm hoặc thay thế theo sheet"
         onclick={triggerExcelImport}
       >
         Import Excel

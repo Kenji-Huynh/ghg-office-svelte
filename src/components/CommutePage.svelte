@@ -1,8 +1,11 @@
 <script>
   import { DEPT_OPTIONS, COMMUTE_VEHICLES } from '../lib/constants.js'
-  import { COMPANIES } from '../lib/companies.js'
+  import { COMPANIES, isValidCompany, matchesCompany } from '../lib/companies.js'
+  import CompanySelect from './CompanySelect.svelte'
+  import CompanyFilterBadge from './CompanyFilterBadge.svelte'
+  import RowActionIcons from './RowActionIcons.svelte'
   import { calcCommute } from '../lib/calculations.js'
-  import { commuteList, upsertCommute, deleteCommuteById } from '../lib/ghg.js'
+  import { commuteList, upsertCommute, deleteCommuteById, selectedCompany } from '../lib/ghg.js'
   import { confirmDanger, confirmAction, toastOk, toastErr } from '../lib/notify.js'
 
   let cName = $state('')
@@ -16,13 +19,55 @@
   let cCarpool = $state(1)
   let cWfh = $state(0)
   let cDeptFilter = $state('')
+  /** @type {string | null} */
+  let editingCommuteId = $state(null)
+  let commuteFormCard = $state(/** @type {HTMLDivElement | undefined} */ (undefined))
+
+  /** @param {{ vehicle?: string, ef?: number }} c */
+  function vehicleEfFromRecord(c) {
+    if (c.ef != null && COMMUTE_VEHICLES.some((v) => v.value === Number(c.ef))) return Number(c.ef)
+    const v = String(c.vehicle || '')
+    const hit = COMMUTE_VEHICLES.find(
+      (x) => v === x.label || x.label.startsWith(v) || v.startsWith(x.label.split(' (')[0]),
+    )
+    return hit?.value ?? COMMUTE_VEHICLES[0].value
+  }
+
+  /** @param {Record<string, unknown>} c */
+  function loadCommuteIntoForm(c) {
+    editingCommuteId = String(c.id)
+    cName = String(c.name ?? '')
+    cEmpid = String(c.empId ?? '')
+    cDept = String(c.dept ?? '')
+    cCompany = isValidCompany(c.company) ? String(c.company) : COMPANIES[0]
+    cVehicle = vehicleEfFromRecord(/** @type {{ vehicle?: string, ef?: number }} */ (c))
+    cKm = Number(c.km) || 0
+    cDays = Number(c.days) ?? 22
+    cMonths = Number(c.months) || 1
+    cWfh = Number(c.wfh) || 0
+    cCarpool = Number(c.carpool) || 1
+    commuteFormCard?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    toastOk('Đã tải lên form — chỉnh sửa rồi bấm Cập nhật')
+  }
+
+  function cancelEditCommute() {
+    editingCommuteId = null
+    resetForm(false)
+  }
+
+  $effect(() => {
+    if ($selectedCompany) cCompany = $selectedCompany
+  })
 
   const commuteDeptOptions = $derived.by(() => {
     return [...new Set($commuteList.map((c) => c.dept).filter(Boolean))].sort()
   })
 
   const filteredCommute = $derived.by(() => {
-    return cDeptFilter ? $commuteList.filter((c) => c.dept === cDeptFilter) : [...$commuteList]
+    let list = [...$commuteList]
+    if ($selectedCompany) list = list.filter((c) => matchesCompany(c.company, $selectedCompany))
+    if (cDeptFilter) list = list.filter((c) => c.dept === cDeptFilter)
+    return list
   })
 
   const stats = $derived.by(() => {
@@ -66,7 +111,15 @@
       toastErr('Vui lòng nhập họ tên và mã nhân viên')
       return
     }
-    const ok = await confirmAction('Xác nhận lưu thông tin đi làm?', `Ước tính: ${live.co2} kg CO₂e (cả kỳ)`)
+    if (!isValidCompany(cCompany)) {
+      toastErr('Vui lòng chọn công ty')
+      return
+    }
+    const isEdit = !!editingCommuteId
+    const ok = await confirmAction(
+      isEdit ? 'Cập nhật thông tin đi làm?' : 'Xác nhận lưu thông tin đi làm?',
+      `Ước tính: ${live.co2} kg CO₂e (cả kỳ)`,
+    )
     if (!ok) return
 
     const ef = Number(cVehicle) || 0
@@ -79,10 +132,10 @@
     const vehicleLabel =
       COMMUTE_VEHICLES.find((v) => v.value === ef || v.value == cVehicle)?.label.split(' (')[0] ?? ''
 
-    const existing = $commuteList.find((c) => c.empId === empId)
+    const existing = isEdit ? null : $commuteList.find((c) => c.empId === empId)
     const effectiveDays = Math.max(0, days - wfh)
     upsertCommute({
-      id: existing?.id ?? Date.now().toString(),
+      id: editingCommuteId ?? existing?.id ?? Date.now().toString(),
       name,
       empId,
       dept: cDept,
@@ -98,7 +151,12 @@
       co2,
       savedAt: new Date().toISOString(),
     })
-    toastOk(existing ? `Đã cập nhật thông tin đi làm của ${name}` : `Đã lưu thông tin đi làm của ${name} — ${co2} kg CO₂e`)
+    toastOk(
+      isEdit || existing
+        ? `Đã cập nhật thông tin đi làm của ${name}`
+        : `Đã lưu thông tin đi làm của ${name} — ${co2} kg CO₂e`,
+    )
+    editingCommuteId = null
     await resetForm(false)
   }
 
@@ -118,6 +176,7 @@
     cMonths = 1
     cCarpool = 1
     cWfh = 0
+    editingCommuteId = null
     if (ask) toastOk('Đã xóa form')
   }
 
@@ -125,6 +184,7 @@
     const ok = await confirmDanger('Xóa nhân viên khỏi bảng đi làm?', '', 'Xóa')
     if (!ok) return
     deleteCommuteById(id)
+    if (editingCommuteId === id) editingCommuteId = null
     toastOk('Đã xóa')
   }
 </script>
@@ -134,11 +194,14 @@
   Scope 3.7 · Employee commuting · Phát thải từ quãng đường đi làm của từng nhân viên
 </div>
 
-<div class="card">
+<div class="card" class:trip-form-editing={!!editingCommuteId} bind:this={commuteFormCard}>
   <div class="card-head">
     <div class="card-head-left">
-      <div class="card-title">Thêm / cập nhật thông tin đi làm</div>
+      <div class="card-title">{editingCommuteId ? 'Chỉnh sửa đi làm' : 'Thêm / cập nhật thông tin đi làm'}</div>
       <span class="card-scope scope-s3">SCOPE 3.7</span>
+      {#if editingCommuteId}
+        <span class="eq-draft-pill">Đang sửa</span>
+      {/if}
     </div>
   </div>
   <div class="card-body">
@@ -152,19 +215,15 @@
         <input type="text" placeholder="NV-00123" bind:value={cEmpid} />
       </div>
       <div class="field">
+        <label>Công ty <span class="required">*</span></label>
+        <CompanySelect bind:value={cCompany} hideLabel={true} required={true} id="commute-company" />
+      </div>
+      <div class="field">
         <label>Phòng ban</label>
         <select bind:value={cDept}>
           <option value="">-- Chọn --</option>
           {#each DEPT_OPTIONS as d}
             <option value={d}>{d}</option>
-          {/each}
-        </select>
-      </div>
-      <div class="field">
-        <label>Công ty <span class="required">*</span></label>
-        <select bind:value={cCompany}>
-          {#each COMPANIES as co}
-            <option value={co}>{co}</option>
           {/each}
         </select>
       </div>
@@ -212,15 +271,24 @@
     </div>
 
     <div class="actions-bar">
-      <button type="button" class="btn btn-primary" onclick={saveCommute}>Lưu thông tin đi làm</button>
-      <button type="button" class="btn" onclick={() => resetForm(true)}>Xóa form</button>
+      <button type="button" class="btn btn-primary" onclick={saveCommute}>
+        {editingCommuteId ? 'Cập nhật' : 'Lưu thông tin đi làm'}
+      </button>
+      {#if editingCommuteId}
+        <button type="button" class="btn" onclick={cancelEditCommute}>Hủy sửa</button>
+      {:else}
+        <button type="button" class="btn" onclick={() => resetForm(true)}>Xóa form</button>
+      {/if}
     </div>
   </div>
 </div>
 
 <div class="card">
   <div class="card-head">
-    <div class="card-head-left"><div class="card-title">Bảng tổng hợp đi làm theo nhân viên</div></div>
+    <div class="card-head-left">
+      <div class="card-title">Bảng tổng hợp đi làm theo nhân viên</div>
+      <CompanyFilterBadge />
+    </div>
     <select
       style="padding:6px 10px;font-size:12px;border:1px solid var(--border);border-radius:var(--radius)"
       bind:value={cDeptFilter}
@@ -257,8 +325,8 @@
             <th>#</th>
             <th>Họ và tên</th>
             <th>Mã NV</th>
-            <th>Phòng ban</th>
             <th>Công ty</th>
+            <th>Phòng ban</th>
             <th>Phương tiện</th>
             <th>Km/ngày (1 chiều)</th>
             <th>Ngày/tháng</th>
@@ -271,16 +339,22 @@
         <tbody>
           {#if filteredCommute.length === 0}
             <tr>
-              <td colspan="12" style="text-align:center;color:var(--text3);padding:2rem">Chưa có dữ liệu</td>
+              <td colspan="12" style="text-align:center;color:var(--text3);padding:2rem">
+                {#if $selectedCompany && $commuteList.length > 0}
+                  Không có dòng đi làm của {$selectedCompany} trong kỳ này
+                {:else}
+                  Chưa có dữ liệu
+                {/if}
+              </td>
             </tr>
           {:else}
             {#each filteredCommute as c, i (c.id)}
-              <tr>
+              <tr class:trip-row-editing={c.id === editingCommuteId}>
                 <td style="font-family:var(--mono);font-size:11px;color:var(--text3)">{i + 1}</td>
                 <td><strong>{c.name}</strong></td>
                 <td class="num">{c.empId}</td>
-                <td>{c.dept || '—'}</td>
                 <td>{c.company || '—'}</td>
+                <td>{c.dept || '—'}</td>
                 <td>{c.vehicle}</td>
                 <td class="num">{c.km}</td>
                 <td class="num">{c.days}</td>
@@ -292,7 +366,12 @@
                   >
                 </td>
                 <td>
-                  <button type="button" class="btn btn-danger btn-sm" onclick={() => deleteRow(c.id)}>✕</button>
+                  <RowActionIcons
+                    onEdit={() => loadCommuteIntoForm(c)}
+                    onDelete={() => deleteRow(c.id)}
+                    editTitle="Sửa — tải lên form phía trên"
+                    deleteTitle="Xóa dòng đi làm"
+                  />
                 </td>
               </tr>
             {/each}

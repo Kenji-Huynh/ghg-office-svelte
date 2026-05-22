@@ -1,5 +1,6 @@
 /**
- * Import .xlsx cùng format export (sheet & tiêu đề cột trong periodExcelShared.js).
+ * Import .xlsx — cùng format Xuất / Mẫu Excel (periodExcelShared.js).
+ * Đọc giá trị ô công thức, bỏ dòng TỔNG / mẫu trống, hỗ trợ file cũ & mới.
  */
 
 import { get } from 'svelte/store'
@@ -18,19 +19,35 @@ import {
   EXCEL_OFFICE_HEADERS,
   EXCEL_TRIP_HEADERS,
   EXCEL_COMMUTE_HEADERS,
+  EXCEL_OFFICE_HEADERS_LEGACY,
+  EXCEL_TRIP_HEADERS_LEGACY,
+  EXCEL_COMMUTE_HEADERS_LEGACY,
   EXCEL_OVERVIEW_COMPANY_LABEL,
+  EXCEL_OVERVIEW_COMPANY_LABEL_LEGACY,
   EXCEL_OVERVIEW_LOCATION_LABEL,
+  EXCEL_COL_COMPANY,
+  EXCEL_OPTIONAL_COLUMNS,
 } from './periodExcelShared.js'
 import { COMMUTE_VEHICLES } from './constants.js'
+import { normalizeCompany, COMPANIES } from './companies.js'
+import { calcCommute } from './calculations.js'
+
+/** @param {unknown} cellValue */
+function rawScalar(cellValue) {
+  if (cellValue == null || cellValue === '') return cellValue
+  if (typeof cellValue === 'object' && cellValue !== null && 'result' in cellValue) {
+    return /** @type {{ result?: unknown }} */ (cellValue).result
+  }
+  return cellValue
+}
 
 /** @param {import('exceljs').Cell} cell */
 export function cellToString(cell) {
-  const v = cell.value
+  const v = rawScalar(cell.value)
   if (v == null || v === '') return ''
   if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim()
   if (v instanceof Date) return v.toISOString().slice(0, 10)
   if (typeof v === 'object' && v !== null) {
-    if ('result' in v && v.result != null) return cellToString({ value: v.result })
     if ('richText' in v && Array.isArray(/** @type {{ richText: { text: string }[] }} */ (v).richText))
       return /** @type {{ richText: { text: string }[] }} */ (v).richText.map((p) => p.text).join('').trim()
     if ('text' in v && typeof /** @type {{ text?: string }} */ (v).text === 'string')
@@ -41,7 +58,7 @@ export function cellToString(cell) {
 
 /** @param {import('exceljs').Cell} cell */
 function cellToNumber(cell) {
-  const v = cell.value
+  const v = rawScalar(cell.value)
   if (v == null || v === '') return 0
   if (typeof v === 'number' && Number.isFinite(v)) return v
   const s = cellToString(cell).replace(/,/g, '').replace(/\u00a0/g, '').trim()
@@ -60,9 +77,10 @@ function normHeader(h) {
 /**
  * @param {import('exceljs').Row} row
  * @param {string[]} expected
- * @returns {Record<string, number>}
+ * @param {string[]} [optionalHeaders]
  */
-function headerIndexMap(row, expected) {
+function headerIndexMap(row, expected, optionalHeaders = EXCEL_OPTIONAL_COLUMNS) {
+  const opt = new Set(optionalHeaders.map(normHeader))
   /** @type {Record<string, number>} */
   const map = {}
   row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
@@ -71,6 +89,7 @@ function headerIndexMap(row, expected) {
   })
   for (const h of expected) {
     const n = normHeader(h)
+    if (opt.has(n)) continue
     if (map[n] === undefined) {
       throw new Error(`Thiếu cột bắt buộc: «${h}». Kiểm tra hàng tiêu đề sheet.`)
     }
@@ -78,9 +97,34 @@ function headerIndexMap(row, expected) {
   return map
 }
 
+/**
+ * @param {import('exceljs').Row} row
+ * @param {string[]} modern
+ * @param {string[]} legacy
+ */
+function resolveHeaderMap(row, modern, legacy) {
+  try {
+    return headerIndexMap(row, modern)
+  } catch {
+    return headerIndexMap(row, legacy)
+  }
+}
+
+/** @param {Record<string, number>} col @param {string} name */
+function colIndex(col, name) {
+  return col[normHeader(name)]
+}
+
+/** @param {import('exceljs').Row} row @param {Record<string, number>} col @param {string} name */
+function cellAt(row, col, name) {
+  const i = colIndex(col, name)
+  if (!i) return { value: '' }
+  return row.getCell(i)
+}
+
 /** @param {import('exceljs').Worksheet} ws */
 function sheetLastUsedRow(ws) {
-  let max = 0
+  let max = 1
   ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     max = Math.max(max, rowNumber)
   })
@@ -90,21 +134,18 @@ function sheetLastUsedRow(ws) {
 /** @param {import('exceljs').Worksheet} sheet @param {number} rowNum */
 function rowIsPlaceholder(sheet, rowNum) {
   const t = cellToString(sheet.getRow(rowNum).getCell(1))
-  return t.startsWith('(')
+  const u = t.toUpperCase()
+  return t.startsWith('(') || u === 'TỔNG' || u === 'TONG'
 }
 
-/**
- * @param {import('exceljs').Worksheet} sheet
- * @param {number} rowNum
- * @param {Record<string, number>} map
- * @param {string[]} keysInOrder
- */
-function rowHasAnyValue(sheet, rowNum, map, keysInOrder) {
-  for (const h of keysInOrder) {
-    const c = sheet.getRow(rowNum).getCell(map[normHeader(h)])
-    if (cellToString(c) !== '' || cellToNumber(c) !== 0) return true
-  }
-  return false
+/** @param {string} raw @param {string} defaultCompany @param {string[]} warnings @param {string} ctx */
+function resolveCompany(raw, defaultCompany, warnings, ctx) {
+  const t = String(raw ?? '').trim()
+  if (!t) return defaultCompany
+  const n = normalizeCompany(t)
+  if (n) return n
+  warnings.push(`${ctx}: công ty «${t}» không hợp lệ — dùng mặc định hoặc bỏ trống (${COMPANIES.join(', ')})`)
+  return defaultCompany
 }
 
 function emptyFlightLeg() {
@@ -130,6 +171,7 @@ function normKey(v) {
 /** @param {any} r */
 function equipSig(r) {
   return [
+    normKey(r.company),
     normKey(r.equipment),
     normKey(r.source),
     Number(r.scope) || 1,
@@ -143,6 +185,7 @@ function equipSig(r) {
 /** @param {any} t */
 function tripSig(t) {
   return [
+    normKey(t.company),
     normKey(t.empId),
     normKey(t.trip),
     normKey(t.dateFrom),
@@ -154,7 +197,14 @@ function tripSig(t) {
 
 /** @param {any} c */
 function commuteSig(c) {
-  return [normKey(c.empId), normKey(c.vehicle), Number(c.km) || 0, Number(c.days) || 0, Number(c.wfh) || 0].join('|')
+  return [
+    normKey(c.company),
+    normKey(c.empId),
+    normKey(c.vehicle),
+    Number(c.km) || 0,
+    Number(c.days) || 0,
+    Number(c.wfh) || 0,
+  ].join('|')
 }
 
 /** @param {string} label */
@@ -180,7 +230,14 @@ function parseOverview(workbook) {
     if (rowNumber < 4) return
     const label = normHeader(cellToString(row.getCell(1)))
     const valB = cellToString(row.getCell(2))
-    if (label === normHeader(EXCEL_OVERVIEW_COMPANY_LABEL) && valB) out.company = valB
+    if (
+      (label === normHeader(EXCEL_OVERVIEW_COMPANY_LABEL) ||
+        label === normHeader(EXCEL_OVERVIEW_COMPANY_LABEL_LEGACY)) &&
+      valB &&
+      !valB.includes('·')
+    ) {
+      out.company = normalizeCompany(valB) || valB
+    }
     if (label === normHeader(EXCEL_OVERVIEW_LOCATION_LABEL) && valB) out.location = valB
   })
   return out
@@ -188,22 +245,16 @@ function parseOverview(workbook) {
 
 /**
  * @param {ArrayBuffer} arrayBuffer
- * @returns {Promise<{
- *   hasOfficeSheet: boolean,
- *   equip: unknown[],
- *   hasTripSheet: boolean,
- *   trips: unknown[],
- *   hasCommuteSheet: boolean,
- *   commutes: unknown[],
- *   overview: { company?: string, location?: string },
- * }>}
  */
 export async function parsePeriodExcel(arrayBuffer) {
   const ExcelJS = (await import('exceljs')).default
   const workbook = new ExcelJS.Workbook()
   await workbook.xlsx.load(arrayBuffer)
 
+  /** @type {string[]} */
+  const warnings = []
   const overview = parseOverview(workbook)
+  const defaultCompany = normalizeCompany(overview.company) || ''
 
   let hasOfficeSheet = false
   /** @type {unknown[]} */
@@ -212,29 +263,41 @@ export async function parsePeriodExcel(arrayBuffer) {
   const wsO = workbook.getWorksheet(EXCEL_SHEET.office)
   if (wsO) {
     hasOfficeSheet = true
-    const hRow = wsO.getRow(1)
-    const col = headerIndexMap(hRow, EXCEL_OFFICE_HEADERS)
+    const col = resolveHeaderMap(wsO.getRow(1), EXCEL_OFFICE_HEADERS, EXCEL_OFFICE_HEADERS_LEGACY)
     const lastRow = sheetLastUsedRow(wsO)
     for (let r = 2; r <= lastRow; r++) {
       if (rowIsPlaceholder(wsO, r)) continue
-      if (!rowHasAnyValue(wsO, r, col, EXCEL_OFFICE_HEADERS)) continue
       const row = wsO.getRow(r)
-      const g = (/** @param {string} name */ (name) => row.getCell(col[normHeader(name)]))
-      let scope = cellToNumber(g('Scope'))
+      const equipment = cellToString(cellAt(row, col, 'Thiết bị'))
+      const source = cellToString(cellAt(row, col, 'Nguồn phát thải'))
+      const volume = cellToNumber(cellAt(row, col, 'Khối lượng'))
+      const ef = cellToNumber(cellAt(row, col, 'EF (kg CO₂e/đvị)'))
+      if (!equipment && !source && !volume && !ef) continue
+
+      let scope = cellToNumber(cellAt(row, col, 'Scope'))
       if (!scope) {
-        const st = cellToString(g('Scope'))
+        const st = cellToString(cellAt(row, col, 'Scope'))
         if (st) scope = parseInt(st, 10) || 1
       }
       if (!scope) scope = 1
+
+      const company = resolveCompany(
+        cellToString(cellAt(row, col, EXCEL_COL_COMPANY)),
+        defaultCompany,
+        warnings,
+        `Văn phòng dòng ${r}`,
+      )
+
       equip.push({
         id: `imp_${Date.now()}_${r}_${Math.random().toString(36).slice(2, 7)}`,
-        equipment: cellToString(g('Thiết bị')),
-        source: cellToString(g('Nguồn phát thải')),
+        equipment,
+        company,
+        source,
         scope: scope === 2 ? 2 : 1,
-        unit: cellToString(g('Đơn vị')),
-        volume: cellToNumber(g('Khối lượng')),
-        ef: cellToNumber(g('EF (kg CO₂e/đvị)')),
-        efRef: cellToString(g('EF Reference')),
+        unit: cellToString(cellAt(row, col, 'Đơn vị')),
+        volume,
+        ef,
+        efRef: cellToString(cellAt(row, col, 'EF Reference')),
         confirmed: true,
       })
     }
@@ -247,39 +310,52 @@ export async function parsePeriodExcel(arrayBuffer) {
   const wsT = workbook.getWorksheet(EXCEL_SHEET.trip)
   if (wsT) {
     hasTripSheet = true
-    const hRow = wsT.getRow(1)
-    const col = headerIndexMap(hRow, EXCEL_TRIP_HEADERS)
+    const col = resolveHeaderMap(wsT.getRow(1), EXCEL_TRIP_HEADERS, EXCEL_TRIP_HEADERS_LEGACY)
     const lastRow = sheetLastUsedRow(wsT)
     for (let r = 2; r <= lastRow; r++) {
       if (rowIsPlaceholder(wsT, r)) continue
-      if (!rowHasAnyValue(wsT, r, col, EXCEL_TRIP_HEADERS)) continue
       const row = wsT.getRow(r)
-      const g = (/** @param {string} name */ (name) => row.getCell(col[normHeader(name)]))
-      const name = cellToString(g('Họ và tên'))
-      const empId = cellToString(g('Mã NV'))
+      const name = cellToString(cellAt(row, col, 'Họ và tên'))
+      const empId = cellToString(cellAt(row, col, 'Mã NV'))
+      const tripName = cellToString(cellAt(row, col, 'Tên chuyến'))
       if (!name && !empId) continue
-      const co2Air = cellToNumber(g('CO₂ bay (kg)'))
-      const co2Ground = cellToNumber(g('CO₂ mặt đất (kg)'))
-      const co2Hotel = cellToNumber(g('CO₂ lưu trú (kg)'))
-      let co2Total = cellToNumber(g('Tổng (kg CO₂e)'))
-      if (!co2Total && (co2Air || co2Ground || co2Hotel)) co2Total = co2Air + co2Ground + co2Hotel
+      if (!tripName && !name) continue
+
+      const company = resolveCompany(
+        cellToString(cellAt(row, col, EXCEL_COL_COMPANY)),
+        defaultCompany,
+        warnings,
+        `Chuyến CT dòng ${r}`,
+      )
+
+      const co2Air = cellToNumber(cellAt(row, col, 'CO₂ bay (kg)'))
+      const co2Ground = cellToNumber(cellAt(row, col, 'CO₂ mặt đất (kg)'))
+      const co2Hotel = cellToNumber(cellAt(row, col, 'CO₂ lưu trú (kg)'))
+      let co2Total = cellToNumber(cellAt(row, col, 'Tổng (kg CO₂e)'))
+      if (!co2Total && (co2Air || co2Ground || co2Hotel)) {
+        co2Total = Math.round((co2Air + co2Ground + co2Hotel) * 10) / 10
+      }
+
       trips.push({
         id: `imp_${Date.now()}_${r}_${Math.random().toString(36).slice(2, 7)}`,
         name,
         empId,
-        dept: cellToString(g('Phòng ban')),
-        trip: cellToString(g('Tên chuyến')),
-        purpose: cellToString(g('Mục đích')),
-        from: cellToString(g('Điểm xuất phát')),
-        to: cellToString(g('Điểm đến')),
-        dateFrom: cellToString(g('Ngày đi')),
-        dateTo: cellToString(g('Ngày về')),
+        company,
+        dept: cellToString(cellAt(row, col, 'Phòng ban')),
+        trip: tripName,
+        purpose: cellToString(cellAt(row, col, 'Mục đích')),
+        from: cellToString(cellAt(row, col, 'Điểm xuất phát')),
+        to: cellToString(cellAt(row, col, 'Điểm đến')),
+        dateFrom: cellToString(cellAt(row, col, 'Ngày đi')),
+        dateTo: cellToString(cellAt(row, col, 'Ngày về')),
         proj: '',
         note: '',
         flightLegs: [emptyFlightLeg()],
+        otherTransports: [],
         groundType: '',
         groundKm: 0,
         fuel: 0,
+        hotelStays: [],
         hotelLabel: '',
         nights: 0,
         rooms: 1,
@@ -299,39 +375,59 @@ export async function parsePeriodExcel(arrayBuffer) {
   const wsC = workbook.getWorksheet(EXCEL_SHEET.commute)
   if (wsC) {
     hasCommuteSheet = true
-    const hRow = wsC.getRow(1)
-    const col = headerIndexMap(hRow, EXCEL_COMMUTE_HEADERS)
+    const col = resolveHeaderMap(wsC.getRow(1), EXCEL_COMMUTE_HEADERS, EXCEL_COMMUTE_HEADERS_LEGACY)
+    const hasEfCol = colIndex(col, 'EF (kg/km)') != null
     const lastRow = sheetLastUsedRow(wsC)
     for (let r = 2; r <= lastRow; r++) {
       if (rowIsPlaceholder(wsC, r)) continue
-      if (!rowHasAnyValue(wsC, r, col, EXCEL_COMMUTE_HEADERS)) continue
       const row = wsC.getRow(r)
-      const g = (/** @param {string} name */ (name) => row.getCell(col[normHeader(name)]))
-      const name = cellToString(g('Họ và tên'))
-      const empId = cellToString(g('Mã NV'))
+      const name = cellToString(cellAt(row, col, 'Họ và tên'))
+      const empId = cellToString(cellAt(row, col, 'Mã NV'))
       if (!name && !empId) continue
-      const days = cellToNumber(g('Ngày đi làm / tháng'))
-      const wfh = cellToNumber(g('WFH (ngày/tháng)'))
 
-      const vehicle = cellToString(g('Phương tiện'))
-      const ef = efFromVehicleLabel(vehicle)
+      const vehicle = cellToString(cellAt(row, col, 'Phương tiện'))
+      const km = cellToNumber(cellAt(row, col, 'Km một chiều'))
+      const days = cellToNumber(cellAt(row, col, 'Ngày đi làm / tháng'))
+      const wfh = cellToNumber(cellAt(row, col, 'WFH (ngày/tháng)'))
+      if (!vehicle && !km && !days) continue
+
+      const company = resolveCompany(
+        cellToString(cellAt(row, col, EXCEL_COL_COMPANY)),
+        defaultCompany,
+        warnings,
+        `Đi làm dòng ${r}`,
+      )
+
+      let ef = hasEfCol ? cellToNumber(cellAt(row, col, 'EF (kg/km)')) : 0
+      if (!ef) ef = efFromVehicleLabel(vehicle)
+      const carpool = cellToNumber(cellAt(row, col, 'Carpool (người)')) || 1
+      let co2 = cellToNumber(cellAt(row, col, 'CO₂e (kg)'))
+      if (!co2 && ef && km) co2 = calcCommute(ef, km, days, 1, wfh, carpool)
+
       commutes.push({
         id: `imp_${Date.now()}_${r}_${Math.random().toString(36).slice(2, 7)}`,
         name,
         empId,
-        dept: cellToString(g('Phòng ban')),
+        company,
+        dept: cellToString(cellAt(row, col, 'Phòng ban')),
         vehicle,
         ef,
-        km: cellToNumber(g('Km một chiều')),
+        km,
         days,
         months: 1,
         wfh,
-        carpool: cellToNumber(g('Carpool (người)')) || 1,
+        carpool,
         effectiveDays: Math.max(0, days - wfh),
-        co2: cellToNumber(g('CO₂e (kg)')),
+        co2,
         savedAt: new Date().toISOString(),
       })
     }
+  }
+
+  if (!hasOfficeSheet && !hasTripSheet && !hasCommuteSheet) {
+    throw new Error(
+      `Không tìm thấy sheet dữ liệu. Cần ít nhất một trong: «${EXCEL_SHEET.office}», «${EXCEL_SHEET.trip}», «${EXCEL_SHEET.commute}».`,
+    )
   }
 
   return {
@@ -342,15 +438,43 @@ export async function parsePeriodExcel(arrayBuffer) {
     hasCommuteSheet,
     commutes,
     overview,
+    warnings,
+    counts: {
+      equip: equip.length,
+      trips: trips.length,
+      commutes: commutes.length,
+    },
   }
 }
 
+/** @param {Awaited<ReturnType<typeof parsePeriodExcel>>} parsed */
+export function buildImportPreviewHtml(parsed) {
+  const lines = []
+  if (parsed.hasOfficeSheet) lines.push(`<strong>Văn phòng:</strong> ${parsed.counts.equip} dòng`)
+  if (parsed.hasTripSheet) lines.push(`<strong>Chuyến CT:</strong> ${parsed.counts.trips} dòng`)
+  if (parsed.hasCommuteSheet) lines.push(`<strong>Đi làm:</strong> ${parsed.counts.commutes} dòng`)
+  if (parsed.overview.company) {
+    lines.push(`<strong>Công ty mặc định kỳ:</strong> ${parsed.overview.company}`)
+  }
+  if (!lines.length) lines.push('Không có dòng dữ liệu hợp lệ trong file.')
+  let html = `<p style="margin:0 0 8px">${lines.join('<br>')}</p>`
+  html +=
+    '<p style="margin:0;font-size:12px;color:#6B6960"><strong>Gộp thêm:</strong> giữ dữ liệu cũ, chỉ thêm dòng mới (bỏ trùng).<br><strong>Thay thế:</strong> xóa dữ liệu sheet có trong file rồi ghi từ Excel (thiết bị nháp chưa ✓ vẫn giữ).</p>'
+  if (parsed.warnings.length) {
+    const show = parsed.warnings.slice(0, 5)
+    html += `<p style="margin:8px 0 0;font-size:11px;color:#B85C00">⚠ ${show.join('<br>⚠ ')}${parsed.warnings.length > 5 ? `<br>… +${parsed.warnings.length - 5} cảnh báo` : ''}</p>`
+  }
+  return html
+}
+
 /**
- * Ghi đè dữ liệu kỳ hiện tại từ file Excel (giữ các dòng thiết bị nháp chưa ✓).
  * @param {ArrayBuffer} arrayBuffer
+ * @param {{ mode?: 'merge'|'replace' }} [options]
  */
-export async function importPeriodExcelAndApply(arrayBuffer) {
+export async function importPeriodExcelAndApply(arrayBuffer, options = {}) {
+  const mode = options.mode === 'replace' ? 'replace' : 'merge'
   const parsed = await parsePeriodExcel(arrayBuffer)
+
   const currentEquipAll = get(equipRows)
   const drafts = currentEquipAll.filter((r) => r.confirmed === false)
   const currentConfirmedEquip = currentEquipAll.filter((r) => r.confirmed !== false)
@@ -360,9 +484,13 @@ export async function importPeriodExcelAndApply(arrayBuffer) {
   let skippedEquip = 0
   let skippedTrips = 0
   let skippedCommutes = 0
+  let addedEquip = 0
+  let addedTrips = 0
+  let addedCommutes = 0
 
   if (parsed.hasOfficeSheet) {
-    const seen = new Set([...drafts, ...currentConfirmedEquip].map(equipSig))
+    const base = mode === 'replace' ? [...drafts] : [...drafts, ...currentConfirmedEquip]
+    const seen = new Set(base.map(equipSig))
     /** @type {any[]} */
     const uniq = []
     for (const row of /** @type {any[]} */ (parsed.equip)) {
@@ -374,60 +502,86 @@ export async function importPeriodExcelAndApply(arrayBuffer) {
       seen.add(sig)
       uniq.push(row)
     }
-    equipRows.set([...drafts, ...currentConfirmedEquip, ...uniq])
+    addedEquip = uniq.length
+    equipRows.set([...base, ...uniq])
     persistEquip()
   }
 
   if (parsed.hasTripSheet) {
-    const existing = new Set(currentTrips.map(tripSig))
-    const seen = new Set()
+    const base = mode === 'replace' ? [] : [...currentTrips]
+    const seen = new Set(base.map(tripSig))
     /** @type {any[]} */
     const uniq = []
     for (const row of /** @type {any[]} */ (parsed.trips)) {
       const sig = tripSig(row)
-      if (existing.has(sig) || seen.has(sig)) {
+      if (seen.has(sig)) {
         skippedTrips++
         continue
       }
       seen.add(sig)
       uniq.push(row)
     }
-    empTrips.set([...currentTrips, ...uniq])
+    addedTrips = uniq.length
+    empTrips.set([...base, ...uniq])
     persistEmp()
   }
 
   if (parsed.hasCommuteSheet) {
-    const existing = new Set(currentCommutes.map(commuteSig))
-    const seen = new Set()
+    const base = mode === 'replace' ? [] : [...currentCommutes]
+    const seen = new Set(base.map(commuteSig))
     /** @type {any[]} */
     const uniq = []
     for (const row of /** @type {any[]} */ (parsed.commutes)) {
       const sig = commuteSig(row)
-      if (existing.has(sig) || seen.has(sig)) {
+      if (seen.has(sig)) {
         skippedCommutes++
         continue
       }
       seen.add(sig)
       uniq.push(row)
     }
-    commuteList.set([...currentCommutes, ...uniq])
+    addedCommutes = uniq.length
+    commuteList.set([...base, ...uniq])
     persistCommute()
   }
 
   const o = get(offSettings)
   if (parsed.overview.company !== undefined || parsed.overview.location !== undefined) {
+    const co =
+      parsed.overview.company !== undefined
+        ? normalizeCompany(parsed.overview.company) || parsed.overview.company
+        : normalizeCompany(o.company ?? '') || o.company || ''
     setCompanyLocation(
-      parsed.overview.company !== undefined ? parsed.overview.company : (o.company ?? ''),
+      co,
       parsed.overview.location !== undefined ? parsed.overview.location : (o.location ?? ''),
     )
   }
 
+  const totalAdded = addedEquip + addedTrips + addedCommutes
+  if (totalAdded === 0 && !parsed.warnings.length) {
+    throw new Error('Không có dòng dữ liệu hợp lệ để import (file trống hoặc chỉ có công thức mẫu?).')
+  }
+
   return {
-    equip: parsed.hasOfficeSheet ? get(equipRows).filter((r) => r.confirmed !== false).length : null,
-    trips: parsed.hasTripSheet ? get(empTrips).length : null,
-    commutes: parsed.hasCommuteSheet ? get(commuteList).length : null,
+    mode,
+    addedEquip,
+    addedTrips,
+    addedCommutes,
     skippedEquip,
     skippedTrips,
     skippedCommutes,
+    warnings: parsed.warnings,
+    equip: parsed.hasOfficeSheet ? get(equipRows).filter((r) => r.confirmed !== false).length : null,
+    trips: parsed.hasTripSheet ? get(empTrips).length : null,
+    commutes: parsed.hasCommuteSheet ? get(commuteList).length : null,
+  }
+}
+
+/** Preview trước khi ghi — dùng trong UI */
+export async function previewPeriodExcelImport(arrayBuffer) {
+  const parsed = await parsePeriodExcel(arrayBuffer)
+  return {
+    html: buildImportPreviewHtml(parsed),
+    parsed,
   }
 }

@@ -6,9 +6,18 @@
     CABIN_OPTIONS,
     TRIP_TRANSPORT_TYPES,
   } from '../lib/constants.js'
-  import { COMPANIES } from '../lib/companies.js'
-  import { calcEmployeeTrip, newTransportSegment } from '../lib/calculations.js'
-  import { empTrips, addEmpTrip, deleteEmpTripById } from '../lib/ghg.js'
+  import { COMPANIES, isValidCompany, matchesCompany } from '../lib/companies.js'
+  import CompanySelect from './CompanySelect.svelte'
+  import CompanyFilterBadge from './CompanyFilterBadge.svelte'
+  import RowActionIcons from './RowActionIcons.svelte'
+  import {
+    calcEmployeeTrip,
+    newTransportSegment,
+    newHotelStay,
+    migrateTripTransports,
+    migrateTripHotels,
+  } from '../lib/calculations.js'
+  import { empTrips, addEmpTrip, updateEmpTripById, deleteEmpTripById, selectedCompany } from '../lib/ghg.js'
   import { confirmDanger, confirmAction, toastOk, toastErr } from '../lib/notify.js'
 
   function newLeg() {
@@ -37,11 +46,16 @@
   let eNote = $state('')
   let eCompany = $state(COMPANIES[0])
   let otherTransports = $state([newTransportSegment()])
-  let eHotelType = $state(HOTEL_OPTIONS[2].value)
-  let eNights = $state(0)
-  let eRooms = $state(1)
+  let hotelStays = $state([newHotelStay()])
   let empSearch = $state('')
   let empDeptFilter = $state('')
+  /** @type {string | null} */
+  let editingTripId = $state(null)
+  let tripFormCard = $state(/** @type {HTMLDivElement | undefined} */ (undefined))
+
+  $effect(() => {
+    if ($selectedCompany) eCompany = $selectedCompany
+  })
 
   const empDeptOptions = $derived.by(() => {
     const depts = [...new Set($empTrips.map((t) => t.dept).filter(Boolean))].sort()
@@ -51,6 +65,7 @@
   const filteredTrips = $derived.by(() => {
     const q = empSearch.toLowerCase()
     let list = [...$empTrips]
+    if ($selectedCompany) list = list.filter((t) => matchesCompany(t.company, $selectedCompany))
     if (q) {
       list = list.filter((t) =>
         `${t.name}${t.trip}${t.from}${t.to}${t.empId}`.toLowerCase().includes(q),
@@ -60,18 +75,24 @@
     return list
   })
 
-  const live = $derived.by(() =>
-    calcEmployeeTrip(
-      flightLegs,
-      otherTransports,
-      Number(eHotelType),
-      Number(eNights) || 0,
-      Number(eRooms) || 1,
-    ),
-  )
+  const live = $derived.by(() => calcEmployeeTrip(flightLegs, otherTransports, hotelStays))
 
   function addTransport() {
     otherTransports = [...otherTransports, newTransportSegment()]
+  }
+
+  function addHotel() {
+    hotelStays = [...hotelStays, newHotelStay()]
+  }
+
+  async function removeHotel(id) {
+    if (hotelStays.length <= 1) {
+      toastErr('Cần ít nhất một dòng lưu trú (có thể để trống)')
+      return
+    }
+    const ok = await confirmDanger('Xóa dòng lưu trú?', '', 'Xóa')
+    if (!ok) return
+    hotelStays = hotelStays.filter((h) => h.id !== id)
   }
 
   async function removeTransport(id) {
@@ -98,6 +119,55 @@
     flightLegs = flightLegs.filter((l) => l.id !== id)
   }
 
+  /** @param {Record<string, unknown>} t */
+  function loadTripIntoForm(t) {
+    editingTripId = String(t.id)
+    eName = String(t.name ?? '')
+    eEmpid = String(t.empId ?? '')
+    eDept = String(t.dept ?? '')
+    eCompany = isValidCompany(t.company) ? String(t.company) : COMPANIES[0]
+    eTrip = String(t.trip ?? '')
+    ePurpose = String(t.purpose ?? PURPOSE_OPTIONS[0])
+    eFrom = String(t.from ?? '')
+    eTo = String(t.to ?? '')
+    eDate = String(t.dateFrom ?? '')
+    eDateTo = String(t.dateTo ?? '')
+    eProj = String(t.proj ?? '')
+    eNote = String(t.note ?? '')
+
+    const legs = t.flightLegs?.length ? JSON.parse(JSON.stringify(t.flightLegs)) : [newLeg()]
+    flightLegs = legs.map((/** @type {{id?:string}} */ l, i) => ({
+      ...l,
+      id: l.id || `leg-edit-${i}-${Date.now()}`,
+    }))
+
+    const transports = migrateTripTransports(t)
+    otherTransports =
+      transports.length > 0
+        ? transports.map((/** @type {{id?:string}} */ s, i) => ({
+            ...s,
+            id: s.id || `pt-edit-${i}-${Date.now()}`,
+          }))
+        : [newTransportSegment()]
+
+    const hotels = migrateTripHotels(t)
+    hotelStays =
+      hotels.length > 0
+        ? hotels.map((/** @type {{id?:string}} */ h, i) => ({
+            ...h,
+            id: h.id || `hotel-edit-${i}-${Date.now()}`,
+          }))
+        : [newHotelStay()]
+
+    tripFormCard?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    toastOk('Đã tải chuyến lên form — chỉnh sửa rồi bấm Cập nhật')
+  }
+
+  function cancelEdit() {
+    editingTripId = null
+    resetForm(false)
+  }
+
   async function saveTrip() {
     const name = eName.trim()
     const empId = eEmpid.trim()
@@ -108,14 +178,24 @@
       toastErr('Vui lòng điền đủ các trường bắt buộc (*)')
       return
     }
-    const ok = await confirmAction('Xác nhận lưu chuyến công tác?', `Tổng ước tính: ${live.total} kg CO₂e`)
+    if (!isValidCompany(eCompany)) {
+      toastErr('Vui lòng chọn công ty')
+      return
+    }
+    const isEdit = !!editingTripId
+    const ok = await confirmAction(
+      isEdit ? 'Cập nhật chuyến công tác?' : 'Xác nhận lưu chuyến công tác?',
+      `Tổng ước tính: ${live.total} kg CO₂e`,
+    )
     if (!ok) return
 
-    const hotelLabel =
-      HOTEL_OPTIONS.find((h) => h.value === Number(eHotelType) || h.value == eHotelType)?.label.split(' (')[0] ?? ''
+    const stays = JSON.parse(JSON.stringify(hotelStays))
+    const firstHotel = HOTEL_OPTIONS.find(
+      (h) => h.value === Number(stays[0]?.hotelType) || h.value == stays[0]?.hotelType,
+    )
 
-    const added = addEmpTrip({
-      id: Date.now().toString(),
+    const payload = {
+      id: editingTripId ?? Date.now().toString(),
       name,
       empId,
       dept,
@@ -130,20 +210,33 @@
       note: eNote,
       flightLegs: JSON.parse(JSON.stringify(flightLegs)),
       otherTransports: JSON.parse(JSON.stringify(otherTransports)),
-      hotelLabel,
-      nights: eNights,
-      rooms: eRooms,
+      hotelStays: stays,
+      hotelLabel: firstHotel?.label.split(' (')[0] ?? '',
+      nights: stays.reduce((s, /** @type {{nights?:number}} */ h) => s + Number(h.nights || 0), 0),
+      rooms: stays[0]?.rooms ?? 1,
       co2Air: live.airCO2,
       co2Ground: live.groundCO2,
       co2Hotel: live.hotelCO2,
       co2Total: live.total,
       savedAt: new Date().toISOString(),
-    })
-    if (!added) {
-      toastErr('Chuyến công tác trùng dữ liệu đã có, không thêm mới.')
-      return
     }
-    toastOk(`Đã lưu "${trip}" — ${live.total} kg CO₂e`)
+
+    if (isEdit) {
+      const updated = updateEmpTripById(editingTripId, payload)
+      if (!updated) {
+        toastErr('Chuyến trùng dữ liệu chuyến khác — đổi mã NV / tên chuyến / ngày / hành trình.')
+        return
+      }
+      toastOk(`Đã cập nhật "${trip}" — ${live.total} kg CO₂e`)
+    } else {
+      const added = addEmpTrip(payload)
+      if (!added) {
+        toastErr('Chuyến công tác trùng dữ liệu đã có, không thêm mới.')
+        return
+      }
+      toastOk(`Đã lưu "${trip}" — ${live.total} kg CO₂e`)
+    }
+    editingTripId = null
     await resetForm(false)
   }
 
@@ -166,10 +259,9 @@
     eNote = ''
     eCompany = COMPANIES[0]
     otherTransports = [newTransportSegment()]
-    eHotelType = HOTEL_OPTIONS[2].value
-    eNights = 0
-    eRooms = 1
+    hotelStays = [newHotelStay()]
     flightLegs = [newLeg()]
+    editingTripId = null
     if (ask) toastOk('Đã xóa form')
   }
 
@@ -177,6 +269,7 @@
     const ok = await confirmDanger('Xóa chuyến công tác?', 'Dữ liệu sẽ bị gỡ khỏi kỳ báo cáo hiện tại.', 'Xóa')
     if (!ok) return
     deleteEmpTripById(id)
+    if (editingTripId === id) editingTripId = null
     toastOk('Đã xóa chuyến công tác')
   }
 </script>
@@ -186,11 +279,14 @@
   Scope 3.6 · Business travel · Ghi nhận từng chuyến công tác của từng nhân viên
 </div>
 
-<div class="card">
+<div class="card" class:trip-form-editing={!!editingTripId} bind:this={tripFormCard}>
   <div class="card-head">
     <div class="card-head-left">
-      <div class="card-title">Thêm chuyến công tác mới</div>
+      <div class="card-title">{editingTripId ? 'Chỉnh sửa chuyến công tác' : 'Thêm chuyến công tác mới'}</div>
       <span class="card-scope scope-s3">SCOPE 3</span>
+      {#if editingTripId}
+        <span class="eq-draft-pill">Đang sửa</span>
+      {/if}
     </div>
   </div>
   <div class="card-body">
@@ -205,19 +301,15 @@
         <input type="text" placeholder="NV-00123" bind:value={eEmpid} />
       </div>
       <div class="field">
+        <label>Công ty <span class="required">*</span></label>
+        <CompanySelect bind:value={eCompany} hideLabel={true} required={true} id="trip-company" />
+      </div>
+      <div class="field">
         <label>Phòng ban <span class="required">*</span></label>
         <select bind:value={eDept}>
           <option value="">-- Chọn --</option>
           {#each DEPT_OPTIONS as d}
             <option value={d}>{d}</option>
-          {/each}
-        </select>
-      </div>
-      <div class="field">
-        <label>Công ty <span class="required">*</span></label>
-        <select bind:value={eCompany}>
-          {#each COMPANIES as co}
-            <option value={co}>{co}</option>
           {/each}
         </select>
       </div>
@@ -360,25 +452,43 @@
     </div>
     <button type="button" class="btn btn-add flight-legs-add" onclick={addTransport}>+ Thêm phương tiện / hóa đơn</button>
 
-    <div class="sec-divider">Lưu trú</div>
-    <div class="g3">
-      <div class="field">
-        <label>Loại khách sạn</label>
-        <select bind:value={eHotelType}>
-          {#each HOTEL_OPTIONS as h}
-            <option value={h.value}>{h.label}</option>
-          {/each}
-        </select>
-      </div>
-      <div class="field">
-        <label>Số đêm</label>
-        <input type="number" placeholder="0" min="0" bind:value={eNights} />
-      </div>
-      <div class="field">
-        <label>Số phòng</label>
-        <input type="number" min="1" bind:value={eRooms} />
-      </div>
+    <div class="sec-divider">Lưu trú — nhiều khách sạn / chỗ nghỉ</div>
+    <p class="flight-legs-intro">
+      Mỗi dòng = một chỗ nghỉ (khách sạn khác nhau, homestay, nhà nghỉ…). Ví dụ: 3 đêm KS A + 2 đêm KS B.
+    </p>
+    <div class="flight-legs-list">
+      {#each hotelStays as stay, idx (stay.id)}
+        <div class="flight-leg-card">
+          <div class="flight-leg-card-toolbar">
+            <span class="flight-leg-badge">Chỗ nghỉ {idx + 1}</span>
+            <button type="button" class="btn btn-danger btn-sm" onclick={() => removeHotel(stay.id)}>Xóa</button>
+          </div>
+          <div class="g3 flight-leg-card-grid">
+            <div class="field span2">
+              <label>Tên / địa điểm (tùy chọn)</label>
+              <input type="text" placeholder="VD: Mường Thanh Đà Nẵng, homestay Hội An" bind:value={stay.note} />
+            </div>
+            <div class="field">
+              <label>Loại chỗ nghỉ</label>
+              <select bind:value={stay.hotelType}>
+                {#each HOTEL_OPTIONS as h}
+                  <option value={h.value}>{h.label}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="field">
+              <label>Số đêm</label>
+              <input type="number" placeholder="0" min="0" bind:value={stay.nights} />
+            </div>
+            <div class="field">
+              <label>Số phòng</label>
+              <input type="number" min="1" bind:value={stay.rooms} />
+            </div>
+          </div>
+        </div>
+      {/each}
     </div>
+    <button type="button" class="btn btn-add flight-legs-add" onclick={addHotel}>+ Thêm chỗ nghỉ / khách sạn</button>
 
     <div class="field">
       <label>Ghi chú</label>
@@ -397,15 +507,24 @@
     </div>
 
     <div class="actions-bar">
-      <button type="button" class="btn btn-primary" onclick={saveTrip}>Lưu chuyến công tác</button>
-      <button type="button" class="btn" onclick={() => resetForm(true)}>Xóa form</button>
+      <button type="button" class="btn btn-primary" onclick={saveTrip}>
+        {editingTripId ? 'Cập nhật chuyến' : 'Lưu chuyến công tác'}
+      </button>
+      {#if editingTripId}
+        <button type="button" class="btn" onclick={cancelEdit}>Hủy sửa</button>
+      {:else}
+        <button type="button" class="btn" onclick={() => resetForm(true)}>Xóa form</button>
+      {/if}
     </div>
   </div>
 </div>
 
 <div class="card">
   <div class="card-head">
-    <div class="card-head-left"><div class="card-title">Lịch sử chuyến công tác</div></div>
+    <div class="card-head-left">
+      <div class="card-title">Lịch sử chuyến công tác</div>
+      <CompanyFilterBadge />
+    </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <input
         type="text"
@@ -429,9 +548,10 @@
       <table>
         <thead>
           <tr>
-            <th>Nhân viên</th>
-            <th>Phòng ban</th>
+            <th>Họ và tên</th>
+            <th>Mã NV</th>
             <th>Công ty</th>
+            <th>Phòng ban</th>
             <th>Chuyến đi</th>
             <th>Hành trình</th>
             <th>Ngày</th>
@@ -445,7 +565,13 @@
         <tbody>
           {#if filteredTrips.length === 0}
             <tr>
-              <td colspan="11" style="text-align:center;color:var(--text3);padding:2rem">Chưa có dữ liệu</td>
+              <td colspan="12" style="text-align:center;color:var(--text3);padding:2rem">
+                {#if $selectedCompany && $empTrips.length > 0}
+                  Không có chuyến của {$selectedCompany} trong kỳ này (thử chọn «Tất cả công ty» trên thanh trên)
+                {:else}
+                  Chưa có dữ liệu
+                {/if}
+              </td>
             </tr>
           {:else}
             {#each filteredTrips as t}
@@ -464,13 +590,22 @@
                   : t.fuel || t.groundKm
                     ? 'Xe/xăng (cũ)'
                     : ''}
-              <tr>
-                <td>
-                  <strong>{t.name}</strong><br />
-                  <span style="font-size:11px;color:var(--text3);font-family:var(--mono)">{t.empId}</span>
-                </td>
-                <td>{t.dept}</td>
+              {@const hotelSummary =
+                t.hotelStays?.length
+                  ? t.hotelStays
+                      .map(
+                        (/** @type {{note?:string,nights?:number,rooms?:number}} */ h) =>
+                          `${h.note || 'KS'} ${h.nights}đ×${h.rooms || 1}p`,
+                      )
+                      .join(' · ')
+                  : t.nights
+                    ? `${t.hotelLabel || 'KS'} ${t.nights}đ`
+                    : '—'}
+              <tr class:trip-row-editing={t.id === editingTripId}>
+                <td><strong>{t.name}</strong></td>
+                <td class="num" style="font-family:var(--mono);font-size:12px">{t.empId}</td>
                 <td>{t.company || '—'}</td>
+                <td>{t.dept}</td>
                 <td>
                   {t.trip}<br />
                   <span style="font-size:11px;color:var(--text3)">{t.purpose || ''}</span>
@@ -480,7 +615,10 @@
                 <td style="font-size:11px;font-family:var(--mono)">{legSummary}{#if ptSummary}<br /><span style="color:var(--text3)">{ptSummary}</span>{/if}</td>
                 <td class="num">{t.co2Air || 0}</td>
                 <td class="num">{t.co2Ground || 0}</td>
-                <td class="num">{t.co2Hotel || 0}</td>
+                <td class="num" style="font-size:11px">
+                  {t.co2Hotel || 0}
+                  {#if hotelSummary !== '—'}<br /><span style="color:var(--text3);font-weight:400">{hotelSummary}</span>{/if}
+                </td>
                 <td>
                   <span
                     class="badge {t.co2Total > 500 ? 'badge-r' : t.co2Total > 100 ? 'badge-a' : 'badge-g'}"
@@ -488,7 +626,12 @@
                   >
                 </td>
                 <td>
-                  <button type="button" class="btn btn-danger btn-sm" onclick={() => deleteTrip(t.id)}>✕</button>
+                  <RowActionIcons
+                    onEdit={() => loadTripIntoForm(t)}
+                    onDelete={() => deleteTrip(t.id)}
+                    editTitle="Sửa chuyến — tải lên form phía trên"
+                    deleteTitle="Xóa chuyến công tác"
+                  />
                 </td>
               </tr>
             {/each}

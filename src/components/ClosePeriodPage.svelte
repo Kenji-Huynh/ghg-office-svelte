@@ -16,7 +16,7 @@
   import { loadLarkSettings } from '../lib/larkSettings.js'
   import { syncSnapshotToLark } from '../lib/larkBitable.js'
   import { COMPANIES } from '../lib/companies.js'
-  import { toastOk, toastErr } from '../lib/notify.js'
+  import { toastOk, toastErr, showErrorDetail } from '../lib/notify.js'
 
   let snapshots = $state(loadSnapshots())
   let busy = $state(false)
@@ -83,7 +83,7 @@
         `Lark Base — VP: ${r.office}, CT: ${r.trips}, Đi làm: ${r.commute}${r.closeRows ? `, Tổng hợp: ${r.closeRows}` : ''}`,
       )
     } catch (e) {
-      toastErr(/** @type {Error} */ (e).message || String(e))
+      await showErrorDetail(e, 'Gửi Lark Base (chốt kỳ) thất bại')
     } finally {
       busy = false
     }

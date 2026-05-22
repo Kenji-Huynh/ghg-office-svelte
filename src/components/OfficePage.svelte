@@ -1,6 +1,9 @@
 <script>
   import { EMISSION_SOURCES, UNIT_OPTIONS } from '../lib/constants.js'
-  import { COMPANIES } from '../lib/companies.js'
+  import { COMPANIES, isValidCompany, matchesCompany } from '../lib/companies.js'
+  import CompanySelect from './CompanySelect.svelte'
+  import CompanyFilterBadge from './CompanyFilterBadge.svelte'
+  import RowActionIcons from './RowActionIcons.svelte'
   import { get } from 'svelte/store'
   import {
     equipRows,
@@ -14,26 +17,42 @@
     updateEquip,
     selectSource,
     isEquipInReport,
+    selectedCompany,
   } from '../lib/ghg.js'
   import { confirmDanger, toastOk, confirmAction, toastErr } from '../lib/notify.js'
 
-  let company = $state('')
   let location = $state('')
   let defaultCompany = $state(COMPANIES[0])
 
   $effect(() => {
-    company = $offSettings.company ?? ''
+    const saved = $offSettings.company ?? ''
+    if (isValidCompany(saved)) defaultCompany = saved
     location = $offSettings.location ?? ''
   })
 
-  function persistSettings() {
-    setCompanyLocation(company, location)
+  $effect(() => {
+    if ($selectedCompany) defaultCompany = $selectedCompany
+  })
+
+  $effect(() => {
+    if (!isValidCompany(defaultCompany)) return
+    setCompanyLocation(defaultCompany, location)
+  })
+
+  function persistLocation() {
+    if (!isValidCompany(defaultCompany)) return
+    setCompanyLocation(defaultCompany, location)
   }
+
+  const visibleEquipRows = $derived.by(() => {
+    if (!$selectedCompany) return $equipRows
+    return $equipRows.filter((r) => matchesCompany(r.company, $selectedCompany))
+  })
 
   const officeTotals = $derived.by(() => {
     let s1 = 0
     let s2 = 0
-    for (const r of $equipRows) {
+    for (const r of visibleEquipRows) {
       if (!isEquipInReport(r)) continue
       const t = r.volume && r.ef ? (r.volume * r.ef) / 1000 : 0
       if (r.scope === 1) s1 += t
@@ -42,10 +61,10 @@
     return { s1, s2 }
   })
 
-  const confirmedEquipRows = $derived($equipRows.filter(isEquipInReport))
+  const confirmedEquipRows = $derived(visibleEquipRows.filter(isEquipInReport))
 
   /** Chỉ các dòng đang nhập (chưa ✓ vào tổng hợp) */
-  const draftEquipRows = $derived($equipRows.filter((r) => r.confirmed === false))
+  const draftEquipRows = $derived(visibleEquipRows.filter((r) => r.confirmed === false))
 
   async function onDeleteRow(id) {
     const ok = await confirmDanger('Xóa dòng thiết bị?', 'Hành động này không thể hoàn tác.', 'Xóa')
@@ -90,6 +109,10 @@
       toastErr('Vui lòng nhập khối lượng lớn hơn 0')
       return
     }
+    if (!isValidCompany(row.company || defaultCompany)) {
+      toastErr('Vui lòng chọn công ty')
+      return
+    }
     const ok = await confirmAction('Bạn có muốn thêm vào tổng hợp?', '')
     if (!ok) return
     updateEquip(row.id, 'confirmed', true)
@@ -108,10 +131,6 @@
   </div>
   <div class="card-body g3">
     <div class="field">
-      <label>Tên công ty / đơn vị</label>
-      <input type="text" placeholder="Công ty ABC Việt Nam" bind:value={company} oninput={persistSettings} />
-    </div>
-    <div class="field">
       <label>Kỳ báo cáo</label>
       <input
         type="text"
@@ -122,15 +141,11 @@
     </div>
     <div class="field">
       <label>Địa điểm / Cơ sở</label>
-      <input type="text" placeholder="Tòa nhà XYZ, Q.1, TP.HCM" bind:value={location} oninput={persistSettings} />
+      <input type="text" placeholder="Tòa nhà XYZ, Q.1, TP.HCM" bind:value={location} oninput={persistLocation} />
     </div>
     <div class="field">
-      <label>Công ty (mặc định cho dòng mới)</label>
-      <select bind:value={defaultCompany}>
-        {#each COMPANIES as co}
-          <option value={co}>{co}</option>
-        {/each}
-      </select>
+      <label>Công ty (mặc định dòng mới)</label>
+      <CompanySelect bind:value={defaultCompany} hideLabel={true} required={true} id="office-default-company" />
     </div>
   </div>
 </div>
@@ -139,6 +154,7 @@
   <div class="card-head">
     <div class="card-head-left">
       <div class="card-title">Danh sách thiết bị / nguồn phát thải</div>
+      <CompanyFilterBadge />
       <span class="card-scope scope-s1" style="background:#fdecea;color:#c0392b">SCOPE 1 & 2</span>
     </div>
     <button type="button" class="btn btn-add" onclick={onAddRow}>+ Thêm dòng thiết bị</button>
@@ -147,12 +163,12 @@
     <div class="eq-grid eq-grid-header">
       <span>#</span>
       <span>Thiết bị</span>
+      <span>Công ty</span>
       <span>Nguồn phát thải</span>
       <span>Đơn vị</span>
       <span>EF (kgCO₂e)</span>
       <span>EF Reference</span>
       <span>Khối lượng</span>
-      <span>Công ty</span>
       <span class="eq-header-confirm">Xác nhận</span>
       <span class="eq-header-del">Xóa</span>
     </div>
@@ -182,6 +198,17 @@
               value={row.equipment}
               onchange={(e) => updateEquip(row.id, 'equipment', e.currentTarget.value)}
             />
+            <select
+              class="eq-span company-select"
+              value={row.company || defaultCompany}
+              onchange={(e) => updateEquip(row.id, 'company', e.currentTarget.value)}
+              required
+              aria-label="Công ty"
+            >
+              {#each COMPANIES as co}
+                <option value={co}>{co}</option>
+              {/each}
+            </select>
             <select
               class="eq-span"
               value={row.source}
@@ -222,15 +249,6 @@
               step="any"
               onchange={(e) => updateEquip(row.id, 'volume', +e.currentTarget.value)}
             />
-            <select
-              class="eq-span"
-              value={row.company || defaultCompany}
-              onchange={(e) => updateEquip(row.id, 'company', e.currentTarget.value)}
-            >
-              {#each COMPANIES as co}
-                <option value={co}>{co}</option>
-              {/each}
-            </select>
             <div class="eq-confirm-cell">
               <button
                 type="button"
@@ -242,7 +260,7 @@
                 ✓
               </button>
             </div>
-            <button type="button" class="btn btn-danger btn-sm eq-row-icon-btn" onclick={() => onDeleteRow(row.id)}>✕</button>
+            <RowActionIcons onDelete={() => onDeleteRow(row.id)} deleteTitle="Xóa dòng nháp" />
           </div>
           <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <span class="badge {row.scope === 1 ? 'scope-s1' : 'scope-s2'}">Scope {row.scope}</span>
@@ -261,21 +279,24 @@
 
 <div class="card">
   <div class="card-head">
-    <div class="card-head-left"><div class="card-title">Tổng hợp phát thải văn phòng</div></div>
+    <div class="card-head-left">
+      <div class="card-title">Tổng hợp phát thải văn phòng</div>
+      <CompanyFilterBadge />
+    </div>
   </div>
   <div class="card-body">
     <div class="tbl-wrap">
       <table>
         <thead>
           <tr>
-            <th>Nguồn phát thải</th>
             <th>Thiết bị</th>
+            <th>Công ty</th>
+            <th>Nguồn phát thải</th>
             <th>Scope</th>
             <th>Đơn vị</th>
             <th>Khối lượng</th>
             <th>EF</th>
             <th>Tổng GHG (tấn CO₂e)</th>
-            <th>Công ty</th>
             <th class="eq-summary-actions-th">Thao tác</th>
           </tr>
         </thead>
@@ -296,8 +317,9 @@
             {#each confirmedEquipRows as r}
               {@const tot = r.volume && r.ef ? (r.volume * r.ef) / 1000 : 0}
               <tr>
-                <td>{r.source || '—'}</td>
                 <td>{r.equipment || '—'}</td>
+                <td>{r.company || '—'}</td>
+                <td>{r.source || '—'}</td>
                 <td>
                   <span class="badge {r.scope === 1 ? 'scope-s1' : 'scope-s2'}">Scope {r.scope}</span>
                 </td>
@@ -305,26 +327,13 @@
                 <td class="num">{r.volume || 0}</td>
                 <td class="num">{r.ef || 0}</td>
                 <td class="num" style="font-weight:600;color:var(--accent)">{tot.toFixed(4)}</td>
-                <td>{r.company || '—'}</td>
                 <td class="eq-summary-actions">
-                  <button
-                    type="button"
-                    class="btn btn-sm eq-summary-edit"
-                    title="Sửa — đưa lên phần nhập phía trên"
-                    aria-label="Sửa dòng"
-                    onclick={() => onEditFromSummary(r.id)}
-                  >
-                    Sửa
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-danger btn-sm eq-summary-del"
-                    title="Xóa dòng"
-                    aria-label="Xóa dòng"
-                    onclick={() => onDeleteFromSummary(r.id)}
-                  >
-                    🗑
-                  </button>
+                  <RowActionIcons
+                    onEdit={() => onEditFromSummary(r.id)}
+                    onDelete={() => onDeleteFromSummary(r.id)}
+                    editTitle="Sửa — đưa lên phần nhập phía trên"
+                    deleteTitle="Xóa khỏi tổng hợp"
+                  />
                 </td>
               </tr>
             {/each}
