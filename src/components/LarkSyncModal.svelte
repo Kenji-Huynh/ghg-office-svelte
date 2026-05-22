@@ -123,11 +123,15 @@
                 Biến <code>VITE_LARK_*</code> <strong>trống trong bản build</strong>. Trên Vercel: Settings →
                 Environment Variables → tick <strong>Production</strong> → <strong>Redeploy</strong> (không chỉ Save).
               </p>
-            {:else if !larkConfig.ok}
+            {:else if larkConfig.ok}
+              <p class="lark-config-ok">
+                <strong>build ✓</strong> = env đã nhúng lúc build (App ID, Secret, bảng…). Không phải lỗi API — nếu HTTP
+                404 <code>/api/lark</code> thì Redeploy sau khi cập nhật <code>vercel.json</code>.
+              </p>
+            {/if}
+            {:else}
               <p class="lark-config-warn">Thiếu App ID / Secret / Base token sau khi gộp env — kiểm tra tên biến đúng
                 <code>VITE_LARK_APP_ID</code>, …</p>
-            {:else}
-              <p class="lark-config-ok">Đã nhận cấu hình từ build (Vercel env).</p>
             {/if}
             <ul class="lark-config-list">
               <li>
